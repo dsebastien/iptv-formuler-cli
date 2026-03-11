@@ -481,8 +481,12 @@ def keys(ip: str, *names: str, delay: float = 0):
 
 
 def text_input(ip: str, t: str) -> bool:
-    # Quote the text properly for the Android shell — %s is the space escape for ADB input
-    escaped = t.replace(" ", "%s")
+    """Type text on the device via ADB input.
+
+    ADB input text uses %s for spaces. Single quotes in text are escaped
+    for the Android shell. Special characters are handled by shell quoting.
+    """
+    escaped = t.replace(" ", "%s").replace("'", "'\\''")
     code, _ = adb(ip, "shell", f"input text '{escaped}'")
     return code == 0
 
@@ -729,14 +733,19 @@ def stop_playback(ip: str):
 def play_movie(ip: str, query: str):
     """Search for a movie and play the first match.
 
-    UI flow: search in VOD → select first result → detail page → play button.
-    The detail page may focus on a play/resume button or description.
+    UI flow verified via ADB/uiautomator:
+    1. Search in VOD → select first result → detail overlay opens
+    2. Focus lands on description (scroll area)
+    3. Down → focus moves to "Regarder" (Watch) button
+    4. OK → playback starts
     """
     do_search(ip, query, section="vod")
     select_first_result(ip)
-    # Detail page: first action button is auto-focused. Press OK to play.
+    # Detail overlay: focus is on description. Down to "Regarder" button.
     wait(LOAD_DELAY * 0.5)
-    key(ip, "ok")
+    key(ip, "down")   # description → "Regarder" button
+    wait(NAV_DELAY)
+    key(ip, "ok")     # start playback
     wait(LOAD_DELAY * 0.5)
     output_ok(f"Playing movie: '{query}'", {"query": query})
     _notify("Formuler Remote", f"Playing: {query}")
