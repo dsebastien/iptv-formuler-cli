@@ -51,6 +51,8 @@ import time
 import readline  # arrow-key history in interactive mode
 from pathlib import Path
 
+__version__ = "1.1.0"
+
 # ──────────────────────── Color Support ────────────────────────
 
 
@@ -115,6 +117,7 @@ _dotenv = _load_env(Path(".env"))
 _dotenv.update(_load_env(CONFIG_DIR / ".env"))
 
 CONFIG = _load_config()
+ALIASES: dict[str, str] = {k.lower(): v for k, v in CONFIG.get("aliases", {}).items()}
 
 # ──────────────────────── Constants ────────────────────────
 
@@ -129,6 +132,7 @@ MOL3_PKG = "tv.formuler.mol3.real"
 CACHE_DIR = Path.home() / ".cache" / "formuler-remote"
 CHANNELS_CACHE = CACHE_DIR / "channels.json"
 FULL_CHANNELS_CACHE = CACHE_DIR / "full_channels.json"
+HISTORY_FILE = CACHE_DIR / "tune_history.json"
 
 JSON_MODE = False
 AUTO_YES = False
@@ -210,7 +214,8 @@ COMMANDS = {
     "section": {"args": "<name>", "desc": "Switch section (live/vod/series/radio/recordings/settings)"},
     "browse": {"args": "<section>", "desc": "Open section for manual browsing"},
     # Live TV
-    "tune": {"args": "<name|number>", "desc": "Tune channel by name or number. Auto-selects first match with --first"},
+    "tune": {"args": "<name|number>", "desc": "Tune channel by name or number. Resolves aliases. Auto-selects first match with --first"},
+    "aliases": {"args": "", "desc": "List configured channel aliases"},
     "search": {"args": "<query>", "desc": "Search channels in local DB and device provider"},
     "list": {"args": "[filter]", "desc": "List channels from favorites/history cache"},
     "list-all": {"args": "[filter]", "desc": "List all enumerated channels (requires refresh-all first)"},
@@ -259,6 +264,7 @@ COMMANDS = {
     "commands": {"args": "", "desc": "List all commands with args and descriptions (JSON schema)"},
     "keys": {"args": "", "desc": "List all remote key names"},
     "help": {"args": "", "desc": "Show help text"},
+    "version": {"args": "", "desc": "Show version number"},
 }
 
 
@@ -732,6 +738,12 @@ def _tune_by_uid(ip: str, unique_id: str) -> bool:
 
 
 def cmd_tune(ip: str, query: str):
+    # Resolve alias if configured
+    alias_hit = ALIASES.get(query.lower())
+    if alias_hit:
+        info(f"Alias '{query}' → '{alias_hit}'")
+        query = alias_hit
+
     # Try full channel cache first
     if FULL_CHANNELS_CACHE.exists():
         with open(FULL_CHANNELS_CACHE) as f:
@@ -1256,7 +1268,8 @@ HELP_TEXT = f"""
     browse <section>                open section for manual browsing
 
   {_C.CYAN}LIVE TV{_C.RESET}
-    tune <name|number>              tune by name or channel number
+    tune <name|number>              tune by name or channel number (resolves aliases)
+    aliases                         list configured channel aliases
     search <query>                  search local DB + device provider
     list [filter]                   list channels (e.g. 'list BE')
     list-all [filter]               list all enumerated channels
@@ -1313,12 +1326,15 @@ HELP_TEXT = f"""
     commands                        list all commands as JSON schema
     keys                            list all key names
     help                            show this help
+    version                         show version number
     quit / exit                     disconnect
 
   {_C.CYAN}FLAGS{_C.RESET}
     --json                          structured JSON output
     --yes                           skip confirmation prompts
     --first                         auto-select first match
+    --help, -h                      show this help and exit
+    --version                       show version and exit
 """
 
 
@@ -1335,6 +1351,21 @@ def _parse_series_args(args: list[str]) -> tuple[str, int, int]:
     elif len(query_parts) >= 1 and query_parts[-1].isdigit():
         season = int(query_parts.pop())
     return " ".join(query_parts), season, episode
+
+
+def cmd_aliases():
+    """List configured channel aliases."""
+    if not ALIASES:
+        info("No aliases configured. Add [aliases] section to config.toml.")
+        if JSON_MODE:
+            output({})
+        return
+    if JSON_MODE:
+        output(ALIASES)
+        return
+    info("Channel aliases:")
+    for alias, target in sorted(ALIASES.items()):
+        print(f"  {_C.CYAN}{alias}{_C.RESET} → {target}")
 
 
 def dispatch(ip: str, raw: str) -> bool:
@@ -1356,6 +1387,11 @@ def dispatch(ip: str, raw: str) -> bool:
             output(COMMANDS)
         else:
             print(HELP_TEXT)
+    elif cmd == "version":
+        if JSON_MODE:
+            output({"version": __version__})
+        else:
+            print(f"formuler-remote {__version__}")
     elif cmd == "commands":
         output(COMMANDS)
     elif cmd == "keys":
@@ -1375,6 +1411,8 @@ def dispatch(ip: str, raw: str) -> bool:
         go_to_channel_number(ip, args[0])
     elif cmd == "tune" and atxt:
         cmd_tune(ip, atxt)
+    elif cmd == "aliases":
+        cmd_aliases()
     elif cmd == "search" and atxt:
         cmd_search(ip, atxt)
     elif cmd == "list":
@@ -1513,7 +1551,7 @@ def _make_completer(ip: str):
         "repeat", "cec", "record",
         "type", "key", "open", "apps",
         "screenshot", "status", "reboot", "refresh", "refresh-all",
-        "keys", "help", "quit", "exit",
+        "keys", "help", "version", "quit", "exit",
     ]
     commands += list(KEYS.keys())
     commands += list(get_macros().keys())
@@ -1616,12 +1654,20 @@ def interactive(ip: str):
 def main():
     global JSON_MODE, AUTO_YES, AUTO_FIRST
 
+    # Handle --help / --version before anything else (no device needed)
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print(HELP_TEXT)
+        sys.exit(0)
+    if "--version" in sys.argv[1:]:
+        print(f"formuler-remote {__version__}")
+        sys.exit(0)
+
     if not shutil.which("adb"):
         print("Error: adb not found. Install with: sudo pacman -S android-tools")
         sys.exit(1)
 
     # Parse flags
-    flags = {"--json", "--yes", "--first"}
+    flags = {"--json", "--yes", "--first", "--help", "-h", "--version"}
     argv = [a for a in sys.argv[1:] if a not in flags]
     raw_args = set(sys.argv[1:])
     if "--json" in raw_args:
