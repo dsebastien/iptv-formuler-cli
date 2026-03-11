@@ -39,6 +39,8 @@ Prerequisites:
   3. Find device IP: Settings > Network (on the Formuler)
 """
 
+__version__ = "1.1.0"
+
 import datetime
 import fcntl
 import json
@@ -131,12 +133,20 @@ MOL3_PKG = "tv.formuler.mol3.real"
 CACHE_DIR = Path.home() / ".cache" / "formuler-remote"
 CHANNELS_CACHE = CACHE_DIR / "channels.json"
 FULL_CHANNELS_CACHE = CACHE_DIR / "full_channels.json"
+TUNE_HISTORY_FILE = CACHE_DIR / "tune_history.json"
 
 JSON_MODE = False
 AUTO_YES = False
 AUTO_FIRST = False
 VERBOSE = False
+DRY_RUN = False
 ADB_TIMEOUT = 10
+
+# Configurable timing (overridable via [timing] in config)
+_timing = CONFIG.get("timing", {})
+NAV_DELAY = float(_timing.get("nav_delay", 0.25))
+LOAD_DELAY = float(_timing.get("load_delay", 2.0))
+SEARCH_DELAY = float(_timing.get("search_delay", 1.5))
 
 KEYS = {
     "power": 26, "home": 3, "back": 4, "menu": 82,
@@ -197,6 +207,7 @@ def _fuzzy_match(query: str, candidates: list[dict], key: str = "title") -> list
     """Match query against candidates with tiered matching.
 
     Priority: exact > starts-with > all-tokens-contained > spaces-removed containment.
+    Within each tier, shorter titles are preferred (e.g., "TF1" before "TF1 SERIES HD").
     """
     nq = _normalize(query)
     nq_nospace = nq.replace(" ", "")
@@ -216,7 +227,9 @@ def _fuzzy_match(query: str, candidates: list[dict], key: str = "title") -> list
         elif nq_nospace in nv_nospace:
             spaceless.append(item)
 
-    return exact + starts + contains + spaceless
+    # Within each tier, prefer shorter titles (more specific matches first)
+    _by_len = lambda items: sorted(items, key=lambda x: len(x.get(key, "")))
+    return _by_len(exact) + _by_len(starts) + _by_len(contains) + _by_len(spaceless)
 
 
 # ──────────────────────── Command Registry ────────────────────────
@@ -256,6 +269,9 @@ COMMANDS = {
     "list": {"args": "[filter]", "desc": "List channels from favorites/history cache"},
     "list-all": {"args": "[filter]", "desc": "List all enumerated channels (requires refresh-all first)"},
     "channel-info": {"args": "<number>", "desc": "Show details for a channel number"},
+    "last": {"args": "", "desc": "Retune the last tuned channel"},
+    "prev": {"args": "", "desc": "Swap to previous channel (recall)"},
+    "tune-history": {"args": "[count]", "desc": "Show recent tune history with timestamps"},
     "categories": {"args": "", "desc": "Show content category counts"},
     "refresh": {"args": "", "desc": "Reload favorites/history cache from device"},
     "refresh-all": {"args": "", "desc": "Rebuild full channel database (slow, scans A-Z)"},
@@ -285,6 +301,9 @@ COMMANDS = {
     "at": {"args": "<HH:MM> <command>", "desc": "Schedule a command at a specific time"},
     "timers": {"args": "", "desc": "List pending scheduled timers"},
     "cancel-timer": {"args": "<index>", "desc": "Cancel a pending timer by index"},
+    "sleep-timer": {"args": "<minutes>", "desc": "Auto-off: stop playback + CEC standby after N minutes"},
+    "sleep-at": {"args": "<HH:MM>", "desc": "Auto-off at specific time"},
+    "sleep-cancel": {"args": "", "desc": "Cancel pending sleep timer"},
     # Advanced
     "repeat": {"args": "<key> <count>", "desc": "Press a key N times"},
     "cec": {"args": "<on|off|standby>", "desc": "TV power control via CEC pass-through"},
@@ -376,6 +395,9 @@ _current_ip: str = ""
 
 
 def run_adb(*args: str, timeout: int = 10) -> tuple[int, str]:
+    if DRY_RUN:
+        print(f"[dry-run] adb {' '.join(args)}", file=sys.stderr)
+        return 0, ""
     try:
         result = subprocess.run(
             ["adb", *args], capture_output=True, text=True, timeout=timeout
@@ -451,7 +473,9 @@ def key(ip: str, name: str) -> bool:
     return True
 
 
-def keys(ip: str, *names: str, delay: float = 0.25):
+def keys(ip: str, *names: str, delay: float = 0):
+    if delay == 0:
+        delay = NAV_DELAY
     for n in names:
         key(ip, n)
         time.sleep(delay)
@@ -485,7 +509,7 @@ def ensure_mytv(ip: str):
         warn("Launching MyTVOnline...")
         adb(ip, "shell", "monkey", "-p", MOL3_PKG,
             "-c", "android.intent.category.LAUNCHER", "1")
-        wait(3)
+        wait(LOAD_DELAY * 1.5)
 
 
 def open_app(ip: str, package: str):
@@ -521,12 +545,12 @@ def go_to_section(ip: str, section: str) -> bool:
 
     ensure_mytv(ip)
     key(ip, "menu")
-    wait(0.5)
+    wait(NAV_DELAY * 2)
     for _ in range(MOL3_SECTIONS[section]):
         key(ip, "down")
-        wait(0.2)
+        wait(NAV_DELAY)
     key(ip, "ok")
-    wait(1.5)
+    wait(LOAD_DELAY)
     output_ok(f"Switched to: {section}")
     return True
 
@@ -538,28 +562,28 @@ def go_to_section(ip: str, section: str) -> bool:
 def open_search(ip: str, section: str = "vod"):
     go_to_section(ip, section)
     key(ip, "right")
-    wait(0.3)
+    wait(NAV_DELAY)
     for _ in range(10):
         key(ip, "up")
-        wait(0.15)
+        wait(NAV_DELAY * 0.6)
     key(ip, "ok")
-    wait(1)
+    wait(SEARCH_DELAY)
 
 
 def do_search(ip: str, query: str, section: str = "vod"):
     open_search(ip, section)
     text_input(ip, query)
-    wait(0.5)
+    wait(NAV_DELAY * 2)
     key(ip, "ok")
-    wait(2)
+    wait(LOAD_DELAY)
     output_ok(f"Searched for '{query}' in {section}")
 
 
 def select_first_result(ip: str):
     key(ip, "down")
-    wait(0.3)
+    wait(NAV_DELAY)
     key(ip, "ok")
-    wait(2)
+    wait(LOAD_DELAY)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -781,6 +805,92 @@ def channel_by_number(ip: str, number: str) -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════
+#  TUNE HISTORY
+# ══════════════════════════════════════════════════════════════
+
+def _load_tune_history() -> list[dict]:
+    if TUNE_HISTORY_FILE.exists():
+        try:
+            with open(TUNE_HISTORY_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return []
+
+
+def _save_tune_history(history: list[dict]):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(TUNE_HISTORY_FILE, "w") as f:
+        json.dump(history[-50:], f, indent=2, ensure_ascii=False)
+
+
+def _record_tune(channel: dict):
+    """Record a channel tune event to history."""
+    history = _load_tune_history()
+    entry = {
+        "title": channel.get("title", "Unknown"),
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    # Copy relevant fields
+    for k in ("number", "unique_id", "intent", "content_id"):
+        if channel.get(k):
+            entry[k] = channel[k]
+    history.append(entry)
+    _save_tune_history(history)
+
+
+def cmd_last(ip: str):
+    """Retune the last tuned channel."""
+    history = _load_tune_history()
+    if not history:
+        output_err("No tune history. Tune a channel first.")
+        return
+    last = history[-1]
+    output_ok(f"Retuning: {last['title']}", last)
+    _notify("Formuler Remote", f"Retuning: {last['title']}")
+    if last.get("unique_id"):
+        _tune_by_uid(ip, last["unique_id"])
+    elif last.get("intent"):
+        tune_by_intent(ip, last["intent"])
+    else:
+        cmd_tune(ip, last["title"])
+
+
+def cmd_prev(ip: str):
+    """Swap to previous channel (like TV recall button)."""
+    history = _load_tune_history()
+    if len(history) < 2:
+        output_err("Need at least 2 channels in history.")
+        return
+    prev = history[-2]
+    output_ok(f"Switching to previous: {prev['title']}", prev)
+    _notify("Formuler Remote", f"Previous: {prev['title']}")
+    if prev.get("unique_id"):
+        _tune_by_uid(ip, prev["unique_id"])
+    elif prev.get("intent"):
+        tune_by_intent(ip, prev["intent"])
+    else:
+        cmd_tune(ip, prev["title"])
+
+
+def cmd_tune_history(count: int = 10):
+    """Show recent tune history."""
+    history = _load_tune_history()
+    if not history:
+        output_err("No tune history.")
+        return
+    recent = history[-count:]
+    recent.reverse()
+    if JSON_MODE:
+        output(recent)
+    else:
+        for i, entry in enumerate(recent, 1):
+            ts = entry.get("timestamp", "")[:19].replace("T", " ")
+            num = f" #{entry['number']}" if entry.get("number") else ""
+            print(f"  {i:3d}  {ts}  {entry['title']}{num}")
+
+
+# ══════════════════════════════════════════════════════════════
 #  LIVE TV COMMANDS
 # ══════════════════════════════════════════════════════════════
 
@@ -821,6 +931,7 @@ def cmd_tune(ip: str, query: str):
             for ch in full:
                 if ch.get("number") == query:
                     output_ok(f"Tuning to: {ch['title']} (#{query})", ch)
+                    _record_tune(ch)
                     _notify("Formuler Remote", f"Tuning: {ch['title']}")
                     if ch.get("unique_id"):
                         _tune_by_uid(ip, ch["unique_id"])
@@ -830,6 +941,7 @@ def cmd_tune(ip: str, query: str):
         if len(full_matches) == 1 or (full_matches and all(m["title"] == full_matches[0]["title"] for m in full_matches)):
             ch = full_matches[0]
             output_ok(f"Tuning to: {ch['title']}", ch)
+            _record_tune(ch)
             _notify("Formuler Remote", f"Tuning: {ch['title']}")
             if ch.get("unique_id"):
                 _tune_by_uid(ip, ch["unique_id"])
@@ -850,6 +962,7 @@ def cmd_tune(ip: str, query: str):
         if results:
             r = results[0]
             output_ok(f"Tuning to: {r['title']}", r)
+            _record_tune(r)
             _notify("Formuler Remote", f"Tuning: {r['title']}")
             if r.get("unique_id"):
                 _tune_by_uid(ip, r["unique_id"])
@@ -862,6 +975,7 @@ def cmd_tune(ip: str, query: str):
     if len(matches) == 1 or all(m["title"] == matches[0]["title"] for m in matches):
         ch = matches[0]
         output_ok(f"Tuning to: {ch['title']}", ch)
+        _record_tune(ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if ch.get("intent"):
             tune_by_intent(ip, ch["intent"])
@@ -874,6 +988,7 @@ def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
     if AUTO_FIRST or JSON_MODE:
         ch = matches[0]
         output_ok(f"Tuning to: {ch['title']}", ch)
+        _record_tune(ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if is_full and ch.get("unique_id"):
             _tune_by_uid(ip, ch["unique_id"])
@@ -895,6 +1010,7 @@ def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
     if 0 <= idx < len(matches):
         ch = matches[idx]
         output_ok(f"Tuning to: {ch['title']}", ch)
+        _record_tune(ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if is_full and ch.get("unique_id"):
             _tune_by_uid(ip, ch["unique_id"])
@@ -1220,6 +1336,59 @@ def cmd_cancel_timer(index: int):
 
 
 # ══════════════════════════════════════════════════════════════
+#  SLEEP TIMER
+# ══════════════════════════════════════════════════════════════
+
+_sleep_timer: dict | None = None  # {"timer": Timer, "time": str}
+
+
+def _sleep_fire(ip: str):
+    global _sleep_timer
+    print(f"\n{_C.YELLOW}[Sleep Timer]{_C.RESET} Time's up — stopping playback and powering off")
+    key(ip, "stop")
+    wait(1)
+    key(ip, "sleep")
+    _sleep_timer = None
+    _notify("Formuler Remote", "Sleep timer fired — device powering off")
+
+
+def cmd_sleep_timer(ip: str, minutes: float):
+    global _sleep_timer
+    if _sleep_timer and _sleep_timer["timer"].is_alive():
+        _sleep_timer["timer"].cancel()
+    t = threading.Timer(minutes * 60, _sleep_fire, args=[ip])
+    t.daemon = True
+    t.start()
+    target = (datetime.datetime.now() + datetime.timedelta(minutes=minutes)).strftime("%H:%M")
+    _sleep_timer = {"timer": t, "time": target}
+    output_ok(f"Sleep timer set for {minutes:.0f}min (at {target})")
+
+
+def cmd_sleep_at(ip: str, time_str: str):
+    try:
+        h, m = map(int, time_str.split(":"))
+    except ValueError:
+        output_err("Time format: HH:MM (e.g., 23:30)")
+        return
+    now = datetime.datetime.now()
+    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if target <= now:
+        target += datetime.timedelta(days=1)
+    minutes = (target - now).total_seconds() / 60
+    cmd_sleep_timer(ip, minutes)
+
+
+def cmd_sleep_cancel():
+    global _sleep_timer
+    if _sleep_timer and _sleep_timer["timer"].is_alive():
+        _sleep_timer["timer"].cancel()
+        output_ok(f"Sleep timer cancelled (was set for {_sleep_timer['time']})")
+        _sleep_timer = None
+    else:
+        output_err("No sleep timer active.")
+
+
+# ══════════════════════════════════════════════════════════════
 #  ADVANCED REMOTE (Phase 10)
 # ══════════════════════════════════════════════════════════════
 
@@ -1419,6 +1588,9 @@ HELP_TEXT = f"""
 
   {_C.CYAN}LIVE TV{_C.RESET}
     tune <name|number>              tune by name or channel number
+    last                            retune the last tuned channel
+    prev                            swap to previous channel (recall)
+    tune-history [count]            show recent tune history
     search <query>                  search local DB + device provider
     list [filter]                   list channels (e.g. 'list BE')
     list-all [filter]               list all enumerated channels
@@ -1457,6 +1629,9 @@ HELP_TEXT = f"""
     at <HH:MM> <command>            schedule a command
     timers                          list pending timers
     cancel-timer <index>            cancel a timer
+    sleep-timer <minutes>           auto-off after N minutes
+    sleep-at <HH:MM>               auto-off at specific time
+    sleep-cancel                    cancel sleep timer
 
   {_C.CYAN}ADVANCED{_C.RESET}
     repeat <key> <count>            press key N times
@@ -1494,6 +1669,7 @@ HELP_TEXT = f"""
     --wait <N>                      sleep N seconds after command
     --timeout <N>                   override ADB timeout (default 10s)
     --verbose / --debug             print ADB commands to stderr
+    --dry-run                       show ADB commands without executing
     -h / --help                     show usage and exit
 """
 
@@ -1551,6 +1727,12 @@ def dispatch(ip: str, raw: str) -> bool:
         go_to_channel_number(ip, args[0])
     elif cmd == "tune" and atxt:
         cmd_tune(ip, atxt)
+    elif cmd == "last":
+        cmd_last(ip)
+    elif cmd == "prev":
+        cmd_prev(ip)
+    elif cmd == "tune-history":
+        cmd_tune_history(int(args[0]) if args and args[0].isdigit() else 10)
     elif cmd == "search" and atxt:
         cmd_search(ip, atxt)
     elif cmd == "list":
@@ -1618,6 +1800,15 @@ def dispatch(ip: str, raw: str) -> bool:
         cmd_timers()
     elif cmd == "cancel-timer" and args and args[0].isdigit():
         cmd_cancel_timer(int(args[0]) - 1)
+    elif cmd == "sleep-timer" and args:
+        try:
+            cmd_sleep_timer(ip, float(args[0]))
+        except ValueError:
+            output_err("Usage: sleep-timer <minutes>")
+    elif cmd == "sleep-at" and args:
+        cmd_sleep_at(ip, args[0])
+    elif cmd == "sleep-cancel":
+        cmd_sleep_cancel()
 
     # Advanced
     elif cmd == "repeat" and len(args) >= 2 and args[1].isdigit():
@@ -1692,6 +1883,24 @@ def dispatch(ip: str, raw: str) -> bool:
     return True
 
 
+def dispatch_chain(ip: str, raw: str) -> bool:
+    """Dispatch a command string that may contain ; separated commands."""
+    if ";" not in raw:
+        return dispatch(ip, raw)
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith("wait "):
+            try:
+                wait(float(part.split()[1]))
+            except (ValueError, IndexError):
+                wait(1)
+        elif not dispatch(ip, part):
+            return False
+    return True
+
+
 # ══════════════════════════════════════════════════════════════
 #  TAB COMPLETION
 # ══════════════════════════════════════════════════════════════
@@ -1708,6 +1917,8 @@ def _make_completer(ip: str):
         "macro", "macros", "at", "timers", "cancel-timer",
         "repeat", "cec", "record",
         "type", "key", "open", "apps",
+        "last", "prev", "tune-history",
+        "sleep-timer", "sleep-at", "sleep-cancel",
         "export-m3u",
         "wake", "power-off", "history", "watch",
         "screenshot", "status", "ping", "reboot", "refresh", "refresh-all",
@@ -1791,7 +2002,7 @@ def interactive(ip: str):
             break
         if not raw:
             continue
-        if not dispatch(ip, raw):
+        if not dispatch_chain(ip, raw):
             break
 
     try:
@@ -1849,7 +2060,7 @@ def main():
         sys.exit(1)
 
     # Parse flags (including value-bearing ones)
-    simple_flags = {"--json", "--yes", "--first", "--verbose", "--debug"}
+    simple_flags = {"--json", "--yes", "--first", "--verbose", "--debug", "--dry-run"}
     argv = []
     post_wait = 0.0
     i = 1
@@ -1864,6 +2075,9 @@ def main():
                 AUTO_FIRST = True
             elif arg in ("--verbose", "--debug"):
                 VERBOSE = True
+            elif arg == "--dry-run":
+                DRY_RUN = True
+                VERBOSE = True  # dry-run implies verbose
         elif arg == "--wait" and i + 1 < len(sys.argv):
             i += 1
             try:
@@ -1880,6 +2094,9 @@ def main():
                 sys.exit(1)
         elif arg in ("--help", "-h"):
             print(__doc__)
+            sys.exit(0)
+        elif arg in ("--version", "-V"):
+            print(f"formuler-remote {__version__}")
             sys.exit(0)
         elif arg == "--completions" and i + 1 < len(sys.argv):
             i += 1
@@ -1930,7 +2147,7 @@ def main():
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                dispatch(ip, line)
+                dispatch_chain(ip, line)
                 if post_wait > 0:
                     time.sleep(post_wait)
             run_adb("disconnect", tgt(ip))
@@ -1940,7 +2157,7 @@ def main():
             return
 
     cmd_str = " ".join(remaining)
-    dispatch(ip, cmd_str)
+    dispatch_chain(ip, cmd_str)
     if post_wait > 0:
         time.sleep(post_wait)
     run_adb("disconnect", tgt(ip))
