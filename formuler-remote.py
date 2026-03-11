@@ -701,17 +701,10 @@ def select_first_result(ip: str):
     with one tab focused. Results are BELOW the tabs.
     Press down once to move from tabs to results, then ok to select.
     """
-    # Move from tab bar down to first result
+    # After search, tab bar is focused. One "down" moves to first result.
+    # (Verified via uiautomator: tabs are Chaînes TV / VOD / Séries TV / etc.)
     key(ip, "down")
     wait(NAV_DELAY)
-    # Verify we're on a result (not still on tabs) by checking focused text
-    focused = ui_focused_text(ip)
-    if focused and any("Chaînes" in t or "Programme" in t or "VOD" in t or
-                        "Séries" in t or "Radios" in t or "Enregistrements" in t
-                        for t in focused):
-        # Still on tabs, press down again
-        key(ip, "down")
-        wait(NAV_DELAY)
     key(ip, "ok")
     wait(LOAD_DELAY)
 
@@ -741,10 +734,8 @@ def play_movie(ip: str, query: str):
     """
     do_search(ip, query, section="vod")
     select_first_result(ip)
-    # On the movie detail page — look for a play action
+    # Detail page: first action button is auto-focused. Press OK to play.
     wait(LOAD_DELAY * 0.5)
-    focused = ui_focused_text(ip)
-    # The detail page typically has action buttons; press OK on whatever is focused
     key(ip, "ok")
     wait(LOAD_DELAY * 0.5)
     output_ok(f"Playing movie: '{query}'", {"query": query})
@@ -768,27 +759,12 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     do_search(ip, query, section="series")
     select_first_result(ip)
 
-    # We're on the series detail page (StreamSearchActivity).
-    # "Tous les épisodes" button should be focused.
-    # Verify by checking focused text.
+    # Detail page: "Tous les épisodes" is auto-focused → press OK
     wait(LOAD_DELAY * 0.5)
-    focused = ui_focused_text(ip)
-    if focused and any("pisode" in t for t in focused):
-        # "Tous les épisodes" is focused — press OK
-        key(ip, "ok")
-    else:
-        # Fallback: try to find and click "Tous les épisodes"
-        # It's typically the first action button on the detail page
-        if VERBOSE:
-            warn(f"Expected 'Tous les épisodes' focused, got: {focused}")
-        key(ip, "ok")
+    key(ip, "ok")
     wait(LOAD_DELAY)
 
-    # Now in episode browser:
-    # Left panel: season list (Season 1 is selected by default)
-    # Right panel: episodes for selected season
-
-    # Navigate to correct season
+    # Episode browser: seasons on left (Season 1 selected), episodes on right
     if season > 1:
         for _ in range(season - 1):
             key(ip, "down")
@@ -799,20 +775,13 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     key(ip, "right")
     wait(NAV_DELAY)
 
-    # Navigate to correct episode (first episode is focused by default)
+    # Navigate to correct episode (E1 is focused by default)
     if episode > 1:
         for _ in range(episode - 1):
             key(ip, "down")
             wait(NAV_DELAY * 1.2)
 
-    # Verify correct episode is focused
-    focused = ui_focused_text(ip)
-    expected_label = f"S{season}:E{episode}"
-    if focused and not any(expected_label in t for t in focused):
-        if VERBOSE:
-            warn(f"Expected '{expected_label}' focused, got: {focused}")
-
-    # Play the episode
+    # Play
     key(ip, "ok")
     wait(LOAD_DELAY * 0.5)
     label = f"'{query}' S{season:02d}E{episode:02d}"
