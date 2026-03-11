@@ -1478,22 +1478,91 @@ def cmd_search_epg(ip: str, query: str):
 
 
 def cmd_now_playing(ip: str):
-    """Try to capture what's currently playing from logcat."""
-    adb(ip, "shell", "logcat", "-c")
-    key(ip, "info")
-    wait(2)
-    code, out = adb(ip, "shell", "logcat", "-d", "-s", "FormulerExo:*", "MOL-App:*", timeout=10)
-    key(ip, "info")  # dismiss
+    """Show what's currently or recently playing.
 
-    lines = [l for l in out.splitlines() if l.strip() and not l.startswith("-----")]
-    if JSON_MODE:
-        output({"logcat_lines": lines[:50]})
-    elif lines:
-        info("Recent player/app log entries:")
-        for l in lines[:20]:
-            print(f"  {_C.DIM}{l}{_C.RESET}")
+    Checks the current activity to determine content type, then queries
+    the content provider for the most recent entry in the matching history.
+    Falls back to logcat if activity detection fails.
+    """
+    # Detect current activity
+    _, actout = adb(ip, "shell", "dumpsys", "activity", "activities")
+    activity = ""
+    m = re.search(r"mResumedActivity:.*?/([^\s]+)", actout)
+    if m:
+        activity = m.group(1)
+
+    result = {"activity": activity}
+
+    # Map activity to content type
+    if "LiveActivity" in activity:
+        result["type"] = "live"
+        # Get most recent from Live History (channel_id=1)
+        code, out = adb(ip, "shell", "content", "query",
+                        "--uri", "content://formuler.media.tv/preview_program",
+                        "--projection", "title:poster_art_uri:intent_uri",
+                        "--where", "channel_id=1")
+        entries = _parse_content_rows(out)
+        if entries:
+            result["channel"] = entries[0].get("title", "Unknown")
+            result["logo"] = entries[0].get("poster_art_uri", "")
+    elif "StreamActivity" in activity or "StreamSearchActivity" in activity:
+        # Could be VOD or series — check both histories
+        for cid, ctype in [("3", "vod"), ("5", "series")]:
+            code, out = adb(ip, "shell", "content", "query",
+                            "--uri", "content://formuler.media.tv/preview_program",
+                            "--projection", "title:short_description:genre:poster_art_uri:intent_uri",
+                            "--where", f"channel_id={cid}")
+            entries = _parse_content_rows(out)
+            if entries:
+                result["type"] = ctype
+                result["title"] = entries[0].get("title", "Unknown")
+                result["description"] = entries[0].get("short_description", "")
+                result["genre"] = entries[0].get("genre", "")
+                result["poster"] = entries[0].get("poster_art_uri", "")
+                break
     else:
-        warn("No player log entries found.")
+        result["type"] = "idle"
+        result["note"] = "No media activity detected"
+
+    if JSON_MODE:
+        output(result)
+    else:
+        if result.get("type") == "live":
+            info(f"Now playing: {result.get('channel', 'Unknown')} (Live TV)")
+        elif result.get("type") in ("vod", "series"):
+            info(f"Now playing: {result.get('title', 'Unknown')} ({result.get('type').upper()})")
+            if result.get("genre"):
+                print(f"  Genre: {result['genre']}")
+            if result.get("description"):
+                desc = result["description"][:200]
+                print(f"  {_C.DIM}{desc}{'...' if len(result.get('description', '')) > 200 else ''}{_C.RESET}")
+        else:
+            warn("No media currently playing")
+
+
+def _parse_content_rows(output: str) -> list[dict]:
+    """Parse Android content query output into list of dicts."""
+    rows = []
+    for line in output.splitlines():
+        if not line.startswith("Row:"):
+            continue
+        row = {}
+        # Parse key=value pairs (values may contain = signs)
+        parts = line.split(", ")
+        for part in parts:
+            eq = part.find("=")
+            if eq > 0:
+                key = part[:eq].strip()
+                # Clean up "Row: N " prefix from first key
+                if key.startswith("Row:"):
+                    key = key.split()[-1]
+                val = part[eq + 1:].strip()
+                if val == "NULL":
+                    val = None
+                row[key] = val
+        if row:
+            rows.append(row)
+    return rows
 
 
 # ══════════════════════════════════════════════════════════════
