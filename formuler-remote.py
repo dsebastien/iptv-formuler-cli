@@ -1296,8 +1296,7 @@ def cmd_resume(ip: str, content_type: str = "vod"):
 
 def cmd_info(ip: str, query: str, content_type: str = ""):
     channels = get_channels(ip)
-    terms = query.lower().split()
-    matches = [c for c in channels if all(t in c["title"].lower() for t in terms)]
+    matches = _fuzzy_match(query, channels)
     if content_type:
         cat_filter = {"vod": ("VOD History", "VOD Favorites"),
                       "series": ("Series History", "Series Favorites"),
