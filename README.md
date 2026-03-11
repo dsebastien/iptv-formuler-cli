@@ -263,8 +263,21 @@ channels_max_age_hours = 24
 
 [macros]
 morning = "open mytv; wait 3; tune BFM TV"
-news = "tune BFM TV"
+news = "tune bfm"
 movie-night = "section vod; wait 2"
+
+[aliases]
+tf1 = "TF1"
+bfm = "BFM TV"
+france2 = "France 2"
+rtbf = "|BE| La Une"
+```
+
+Aliases let you define short names for channels. Use them with `tune`:
+```bash
+./formuler-remote.py tune bfm       # resolves to "BFM TV"
+./formuler-remote.py tune rtbf      # resolves to "|BE| La Une"
+./formuler-remote.py aliases        # list all configured aliases
 ```
 
 JSON equivalent (`config.json`):
@@ -273,8 +286,14 @@ JSON equivalent (`config.json`):
   "device": {"ip": "192.168.0.100", "port": 5555},
   "cache": {"channels_max_age_hours": 24},
   "macros": {
-    "morning": "open mytv; wait 3; tune BFM TV",
-    "news": "tune BFM TV"
+    "morning": "open mytv; wait 3; tune bfm",
+    "news": "tune bfm"
+  },
+  "aliases": {
+    "tf1": "TF1",
+    "bfm": "BFM TV",
+    "france2": "France 2",
+    "rtbf": "|BE| La Une"
   }
 }
 ```

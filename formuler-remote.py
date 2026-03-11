@@ -215,6 +215,9 @@ COMMANDS = {
     "browse": {"args": "<section>", "desc": "Open section for manual browsing"},
     # Live TV
     "tune": {"args": "<name|number>", "desc": "Tune channel by name or number. Resolves aliases. Auto-selects first match with --first"},
+    "last": {"args": "", "desc": "Retune the last tuned channel"},
+    "prev": {"args": "", "desc": "Retune the previous channel (recall / swap)"},
+    "history": {"args": "", "desc": "Show last 20 tuned channels with timestamps"},
     "aliases": {"args": "", "desc": "List configured channel aliases"},
     "search": {"args": "<query>", "desc": "Search channels in local DB and device provider"},
     "list": {"args": "[filter]", "desc": "List channels from favorites/history cache"},
