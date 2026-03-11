@@ -42,7 +42,6 @@ Prerequisites:
 __version__ = "1.1.0"
 
 import datetime
-import fcntl
 import json
 import os
 import re
@@ -592,9 +591,9 @@ def select_first_result(ip: str):
 
 def stop_playback(ip: str):
     key(ip, "stop")
-    wait(1)
+    wait(LOAD_DELAY * 0.5)
     key(ip, "up")
-    wait(0.2)
+    wait(NAV_DELAY)
     key(ip, "ok")
     output_ok("Playback stopped.")
 
@@ -607,7 +606,7 @@ def play_movie(ip: str, query: str):
     do_search(ip, query, section="vod")
     select_first_result(ip)
     key(ip, "ok")
-    wait(1)
+    wait(LOAD_DELAY * 0.5)
     output_ok(f"Playing movie: '{query}'", {"query": query})
     _notify("Formuler Remote", f"Playing: {query}")
 
@@ -621,29 +620,29 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     select_first_result(ip)
 
     # Navigate to "Tous les épisodes" (last button before Star)
-    keys(ip, "right", "right", "right", delay=0.2)
-    wait(0.2)
+    keys(ip, "right", "right", "right", delay=NAV_DELAY)
+    wait(NAV_DELAY)
     key(ip, "left")  # back from Star
-    wait(0.2)
+    wait(NAV_DELAY)
     key(ip, "ok")    # open episodes browser
-    wait(2)
+    wait(LOAD_DELAY)
 
     if season > 1:
         for _ in range(season - 1):
             key(ip, "down")
-            wait(0.3)
-        wait(0.5)
+            wait(NAV_DELAY * 1.2)
+        wait(NAV_DELAY * 2)
 
     key(ip, "right")
-    wait(0.3)
+    wait(NAV_DELAY * 1.2)
 
     if episode > 1:
         for _ in range(episode - 1):
             key(ip, "down")
-            wait(0.3)
+            wait(NAV_DELAY * 1.2)
 
     key(ip, "ok")
-    wait(1)
+    wait(LOAD_DELAY * 0.5)
     label = f"'{query}' S{season:02d}E{episode:02d}"
     output_ok(f"Playing {label}", {"query": query, "season": season, "episode": episode})
     _notify("Formuler Remote", f"Playing: {label}")
@@ -654,11 +653,11 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
 # ══════════════════════════════════════════════════════════════
 
 def toggle_star(ip: str):
-    keys(ip, "right", "right", "right", "right", delay=0.15)
-    wait(0.2)
+    keys(ip, "right", "right", "right", "right", delay=NAV_DELAY * 0.6)
+    wait(NAV_DELAY)
     key(ip, "ok")
-    wait(0.5)
-    keys(ip, "left", "left", "left", "left", delay=0.15)
+    wait(NAV_DELAY * 2)
+    keys(ip, "left", "left", "left", "left", delay=NAV_DELAY * 0.6)
     output_ok("Star toggled.")
 
 
@@ -667,7 +666,7 @@ def star_search(ip: str, query: str, content_type: str = "vod"):
     select_first_result(ip)
     toggle_star(ip)
     key(ip, "back")
-    wait(0.5)
+    wait(NAV_DELAY * 2)
     output_ok(f"Toggled star for '{query}'")
 
 
@@ -1113,12 +1112,12 @@ def cmd_browse(ip: str, section: str):
 def cmd_episodes(ip: str, query: str):
     do_search(ip, query, section="series")
     select_first_result(ip)
-    keys(ip, "right", "right", "right", delay=0.2)
-    wait(0.2)
+    keys(ip, "right", "right", "right", delay=NAV_DELAY)
+    wait(NAV_DELAY)
     key(ip, "left")
-    wait(0.2)
+    wait(NAV_DELAY)
     key(ip, "ok")
-    wait(2)
+    wait(LOAD_DELAY)
     screenshot(ip, f"/tmp/formuler-episodes.png")
     output_ok(f"Episode browser open for '{query}'. Screenshot saved to /tmp/formuler-episodes.png")
     if not JSON_MODE:
@@ -1346,7 +1345,7 @@ def _sleep_fire(ip: str):
     global _sleep_timer
     print(f"\n{_C.YELLOW}[Sleep Timer]{_C.RESET} Time's up — stopping playback and powering off")
     key(ip, "stop")
-    wait(1)
+    wait(LOAD_DELAY * 0.5)
     key(ip, "sleep")
     _sleep_timer = None
     _notify("Formuler Remote", "Sleep timer fired — device powering off")
@@ -1438,14 +1437,14 @@ def cmd_record_screen(ip: str, duration: int = 30, path: str = "/tmp/formuler-re
 
 def cmd_wake(ip: str):
     key(ip, "wakeup")
-    wait(1)
+    wait(LOAD_DELAY)
     ensure_mytv(ip)
     output_ok("Device awake, MyTV running")
 
 
 def cmd_power_off(ip: str):
     key(ip, "sleep")
-    wait(0.5)
+    wait(NAV_DELAY * 2)
     run_adb("disconnect", tgt(ip))
     output_ok("CEC sleep sent, disconnected")
 
@@ -2094,6 +2093,7 @@ def main():
                 sys.exit(1)
         elif arg in ("--help", "-h"):
             print(__doc__)
+            print(HELP_TEXT)
             sys.exit(0)
         elif arg in ("--version", "-V"):
             print(f"formuler-remote {__version__}")
@@ -2127,7 +2127,10 @@ def main():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     _lock_file = open(CACHE_DIR / ".lock", "w")
     try:
+        import fcntl
         fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        pass  # fcntl not available on Windows — skip locking
     except OSError:
         msg = "Another formuler-remote instance is running"
         if JSON_MODE:
