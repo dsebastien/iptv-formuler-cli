@@ -483,10 +483,19 @@ def keys(ip: str, *names: str, delay: float = 0):
 def text_input(ip: str, t: str) -> bool:
     """Type text on the device via ADB input.
 
-    ADB input text uses %s for spaces. Single quotes in text are escaped
-    for the Android shell. Special characters are handled by shell quoting.
+    ADB input text only supports ASCII. Non-ASCII characters (accents, etc.)
+    cause a NullPointerException on Android. We strip accents and drop
+    unsupported characters before sending.
+
+    Spaces are encoded as %s (ADB convention). Single quotes are escaped.
     """
-    escaped = t.replace(" ", "%s").replace("'", "'\\''")
+    # Strip accents: é→e, à→a, ü→u, etc.
+    ascii_text = _normalize(t)
+    # Remove any remaining non-ASCII characters
+    ascii_text = "".join(c for c in ascii_text if ord(c) < 128)
+    if not ascii_text.strip():
+        return False
+    escaped = ascii_text.replace(" ", "%s").replace("'", "'\\''")
     code, _ = adb(ip, "shell", f"input text '{escaped}'")
     return code == 0
 
