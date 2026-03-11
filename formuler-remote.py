@@ -742,12 +742,23 @@ def stop_playback(ip: str):
 def play_movie(ip: str, query: str):
     """Search for a movie and play the first match.
 
-    UI flow verified via ADB/uiautomator:
+    Strategy:
+    1. Try instant launch via cached intent (favorites/history) — no UI needed
+    2. Fall back to UI search if not in cache
+
+    UI fallback flow (verified via ADB/uiautomator):
     1. Search in VOD → select first result → detail overlay opens
     2. Focus lands on description (scroll area)
     3. Down → focus moves to "Regarder" (Watch) button
     4. OK → playback starts
     """
+    # Fast path: try intent from favorites/history
+    if _play_by_intent(ip, query, ("VOD Favorites", "VOD History")):
+        output_ok(f"Playing movie (instant): '{query}'", {"query": query, "method": "intent"})
+        _notify("Formuler Remote", f"Playing: {query}")
+        return
+
+    # Slow path: UI-based search
     do_search(ip, query, section="vod")
     select_first_result(ip)
     # Detail overlay: focus is on description. Down to "Regarder" button.
@@ -756,7 +767,7 @@ def play_movie(ip: str, query: str):
     wait(NAV_DELAY)
     key(ip, "ok")     # start playback
     wait(LOAD_DELAY * 0.5)
-    output_ok(f"Playing movie: '{query}'", {"query": query})
+    output_ok(f"Playing movie: '{query}'", {"query": query, "method": "search"})
     _notify("Formuler Remote", f"Playing: {query}")
 
 
@@ -767,13 +778,32 @@ def play_movie(ip: str, query: str):
 def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     """Search for a series and play a specific episode.
 
-    UI flow verified via ADB/uiautomator on Formuler Z11 Pro MAX:
-    1. Search → select series from results
-    2. Detail page: "Tous les épisodes" button is auto-focused → press OK
-    3. Episode browser: seasons on left (focused), episodes on right
-       - Down to navigate seasons, Right to move to episodes, Down to navigate episodes
-    4. Press OK on episode to play
+    Strategy:
+    1. Try instant launch via cached intent (favorites/history) — no UI needed.
+       For series, we can rewrite the season_id and episode_id in the stalker:// URL.
+    2. Fall back to UI search if not in cache.
+
+    UI fallback flow (verified via ADB/uiautomator):
+    1. Search → select series → "Tous les épisodes" (auto-focused) → OK
+    2. Episode browser: seasons left, episodes right
+    3. Down×(S-1) for season, Right, Down×(E-1) for episode, OK to play
     """
+    label = f"'{query}' S{season:02d}E{episode:02d}"
+
+    # Fast path: try intent from favorites/history
+    matches = _find_content(query, ("Series Favorites", "Series History"))
+    if matches:
+        intent = matches[0].get("intent", "")
+        if intent and "vod_unique_id" in intent:
+            modified = _build_series_intent(intent, season, episode)
+            if launch_intent(ip, modified):
+                output_ok(f"Playing {label} (instant)", {
+                    "query": query, "season": season, "episode": episode, "method": "intent"
+                })
+                _notify("Formuler Remote", f"Playing: {label}")
+                return
+
+    # Slow path: UI-based search
     do_search(ip, query, section="series")
     select_first_result(ip)
 
@@ -802,8 +832,9 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     # Play
     key(ip, "ok")
     wait(LOAD_DELAY * 0.5)
-    label = f"'{query}' S{season:02d}E{episode:02d}"
-    output_ok(f"Playing {label}", {"query": query, "season": season, "episode": episode})
+    output_ok(f"Playing {label}", {
+        "query": query, "season": season, "episode": episode, "method": "search"
+    })
     _notify("Formuler Remote", f"Playing: {label}")
 
 
@@ -1052,19 +1083,93 @@ def cmd_tune_history(count: int = 10):
 #  LIVE TV COMMANDS
 # ══════════════════════════════════════════════════════════════
 
-def tune_by_intent(ip: str, intent_uri: str) -> bool:
+def launch_intent(ip: str, intent_uri: str) -> bool:
+    """Launch any MOL3 deeplink intent by parsing its URI.
+
+    Handles live channels (channel_type, group_id, unique_channel_id),
+    VOD (vod_unique_id), and series (vod_id, vod_unique_id).
+    """
+    from urllib.parse import unquote
     comp = re.search(r"component=([^;]+)", intent_uri)
-    ct = re.search(r"i\.channel_type=(\d+)", intent_uri)
-    gid = re.search(r"S\.group_id=([^;]+)", intent_uri)
-    uid = re.search(r"S\.unique_channel_id=([^;]+)", intent_uri)
     if not comp:
         return False
     cmd = ["shell", "am", "start", "-n", comp.group(1)]
-    if ct:  cmd += ["--ei", "channel_type", ct.group(1)]
-    if gid: cmd += ["--es", "group_id", gid.group(1)]
-    if uid: cmd += ["--es", "unique_channel_id", uid.group(1)]
+    # Integer extras (i.xxx=val)
+    for m in re.finditer(r"i\.(\w+)=([^;]+)", intent_uri):
+        cmd += ["--ei", m.group(1), m.group(2)]
+    # String extras (S.xxx=val)
+    for m in re.finditer(r"S\.(\w+)=([^;]+)", intent_uri):
+        cmd += ["--es", m.group(1), unquote(m.group(2))]
     code, _ = adb(ip, *cmd)
     return code == 0
+
+
+# Backward compat alias
+tune_by_intent = launch_intent
+
+
+def _find_content(query: str, categories: tuple[str, ...]) -> list[dict]:
+    """Search favorites/history cache for content matching query.
+
+    Returns list of matches with title, intent_uri, category, etc.
+    Prefers favorites over history.
+    """
+    if not CHANNELS_CACHE.exists():
+        return []
+    try:
+        with open(CHANNELS_CACHE) as f:
+            channels = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return []
+    # Filter to requested categories
+    filtered = [c for c in channels if c.get("category") in categories]
+    if not filtered:
+        return []
+    return _fuzzy_match(query, filtered)
+
+
+def _play_by_intent(ip: str, query: str, categories: tuple[str, ...]) -> bool:
+    """Try to play content by launching its cached intent directly.
+
+    Returns True if a match was found and intent launched, False otherwise.
+    """
+    matches = _find_content(query, categories)
+    if not matches:
+        return False
+    match = matches[0]
+    intent = match.get("intent")
+    if not intent:
+        return False
+    return launch_intent(ip, intent)
+
+
+def _build_series_intent(base_intent: str, season: int, episode: int) -> str:
+    """Modify a series intent to target a specific season and episode.
+
+    Series intents contain a stalker:// URL with season_id=SID:SEASON&episode_id=EP.
+    We rewrite these parameters to the desired season/episode.
+    """
+    from urllib.parse import unquote, quote
+    # Extract and decode the vod_unique_id
+    m = re.search(r"S\.vod_unique_id=([^;]+)", base_intent)
+    if not m:
+        return base_intent
+    encoded_url = m.group(1)
+    url = unquote(unquote(encoded_url))  # double decode (may be double-encoded)
+
+    # Rewrite season_id and episode_id
+    url = re.sub(r"season_id=[^&]+", lambda _: f"season_id={_extract_stream_id(url)}:{season}", url)
+    url = re.sub(r"episode_id=\d+", f"episode_id={episode}", url)
+
+    # Re-encode and substitute back
+    new_encoded = quote(url, safe="")
+    return base_intent[:m.start(1)] + new_encoded + base_intent[m.end(1):]
+
+
+def _extract_stream_id(stalker_url: str) -> str:
+    """Extract stream_id from a stalker:// URL."""
+    m = re.search(r"stream_id=(\d+)", stalker_url)
+    return m.group(1) if m else "0"
 
 
 def _tune_by_uid(ip: str, unique_id: str) -> bool:
