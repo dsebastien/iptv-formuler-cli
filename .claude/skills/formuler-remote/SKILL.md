@@ -1,12 +1,12 @@
 ---
 name: formuler-remote
-description: Controls a Formuler Z11 Pro MAX IPTV box via the formuler-remote CLI. Use when the user wants to control their TV, tune channels, play movies or series, manage favorites, check EPG, browse VOD/series, run macros, or interact with the Formuler device. Triggers on tune, channel, play movie, play series, EPG, guide, VOD, IPTV, Formuler, remote control, TV control, watch, star, favorite, macro.
+description: Controls a Formuler Z11 Pro MAX IPTV box via the formuler-remote CLI. Use when the user wants to control their TV, tune channels, play movies or series, manage favorites, check EPG, browse VOD/series, run macros, set sleep timers, or interact with the Formuler device. Triggers on tune, channel, play movie, play series, EPG, guide, VOD, IPTV, Formuler, remote control, TV control, watch, star, favorite, macro, sleep timer, last channel, previous channel.
 allowed-tools: Bash
 ---
 
 # Formuler Remote Control
 
-Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI.
+Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI (75 commands).
 
 ## Critical Rules
 
@@ -16,10 +16,10 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 4. Parse the JSON envelope: `{"ok": true, "message": "...", "data": ...}` or `{"ok": false, "error": "..."}`
 5. Run `formuler-remote --json commands` to discover available commands before guessing
 6. NEVER run the CLI without flags in a non-interactive context (it launches a REPL)
-7. All commands now return proper JSON in `--json` mode (no silent no-ops)
+7. All commands return proper JSON in `--json` mode — every success has a message/data, every error sets exit code 1
 8. Use `ping` to verify device connectivity before running commands
-9. Channel names support fuzzy matching — "tf1" matches "TF 1", accents are ignored
-10. Channel aliases can be configured in the config file under `[aliases]`
+9. Fuzzy matching is built in — "tf1" matches "TF 1", accents are ignored, shorter names are preferred
+10. Chain commands with `;` in a single invocation: `formuler-remote --json --first 'tune TF1 ; wait 3 ; screenshot'`
 
 ## Quick Reference
 
@@ -27,6 +27,9 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 |------|---------|
 | Tune channel | `formuler-remote --json --first tune "BFM TV"` |
 | Tune by number | `formuler-remote --json --first tune 42` |
+| Retune last channel | `formuler-remote --json last` |
+| Swap to previous channel | `formuler-remote --json prev` |
+| Show tune history | `formuler-remote --json tune-history` |
 | Play movie | `formuler-remote --json --first play-movie "batman"` |
 | Play series episode | `formuler-remote --json --first play-series "breaking bad" 2 3` |
 | Search channels | `formuler-remote --json search france` |
@@ -40,8 +43,12 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 | Resume last | `formuler-remote --json --first resume vod` |
 | Wake device | `formuler-remote --json wake` |
 | Power off | `formuler-remote --json power-off` |
+| Sleep timer | `formuler-remote --json sleep-timer 90` |
+| Sleep at time | `formuler-remote --json sleep-at 23:30` |
+| Cancel sleep | `formuler-remote --json sleep-cancel` |
 | Export M3U | `formuler-remote --json export-m3u channels.m3u` |
 | Watch screenshots | `formuler-remote --json watch 5 /tmp` |
+| Chain commands | `formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'` |
 | List commands | `formuler-remote --json commands` |
 | Send key | `formuler-remote --json ok` |
 | Navigate | `formuler-remote --json up` / `down` / `left` / `right` |
@@ -57,6 +64,19 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 | `--wait <N>` | Sleep N seconds after command |
 | `--timeout <N>` | Override ADB timeout (default 10s) |
 | `--verbose` | Print ADB commands to stderr |
+| `--dry-run` | Show ADB commands without executing (implies --verbose) |
+| `-V` / `--version` | Print version and exit |
+
+## Command Chaining
+
+Chain multiple commands with `;` in a single invocation:
+
+```bash
+formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'
+formuler-remote --json --first 'volume-up ; volume-up ; volume-up'
+```
+
+`wait N` is handled inline within chains. This avoids multiple subprocess calls and reconnect overhead.
 
 ## Batch Mode
 
@@ -70,59 +90,70 @@ echo -e "tune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
 
 ### Tuning a channel
 
-1. Search first if unsure about the exact name:
+1. Ping first to verify connectivity:
+   ```bash
+   formuler-remote --json ping
+   ```
+2. Search if unsure about the exact name:
    ```bash
    formuler-remote --json search "TF1"
    ```
-2. Tune using the result (fuzzy matching handles partial names):
+3. Tune (fuzzy matching handles partial/accented names, shorter names preferred):
    ```bash
    formuler-remote --json --first tune "TF1"
    ```
-3. Verify with status:
+4. Quick-switch back to previous channel:
    ```bash
-   formuler-remote --json status
+   formuler-remote --json prev
    ```
 
 ### Playing VOD/Series content
 
-1. Search to confirm availability:
-   ```bash
-   formuler-remote --json search-vod "batman"
-   ```
-2. Play:
-   ```bash
-   formuler-remote --json --first play-movie "batman"
-   ```
-3. For series with specific episode:
-   ```bash
-   formuler-remote --json --first play-series "breaking bad" 2 5
-   ```
+```bash
+formuler-remote --json --first play-movie "batman"
+formuler-remote --json --first play-series "breaking bad" 2 5
+```
+
+### Sleep timer
+
+```bash
+formuler-remote --json sleep-timer 90       # auto-off in 90 minutes
+formuler-remote --json sleep-at 23:30       # auto-off at 11:30 PM
+formuler-remote --json sleep-cancel         # cancel
+```
 
 ### Building the channel database
 
-First run requires enumeration (takes a few minutes):
+First run requires enumeration:
 ```bash
 formuler-remote --json refresh-all
 ```
-After that, `list-all` and `tune` by number work instantly from cache.
+After that, `list-all`, `tune` by number, and `export-m3u` work from cache.
 
-### Macros
+### Macros and chaining
 
-Run predefined command sequences from the user's config:
 ```bash
-formuler-remote --json macros          # list available
-formuler-remote --json macro morning   # run one
+formuler-remote --json macros                                    # list available
+formuler-remote --json macro morning                             # run one
+formuler-remote --json --first 'wake ; tune BFM TV ; wait 3 ; screenshot'  # ad-hoc chain
 ```
 
 ### Channel aliases
 
-Configure aliases in `~/.config/formuler-remote/config.toml`:
+Configure in `~/.config/formuler-remote/config.toml`:
 ```toml
 [aliases]
 tf1 = "TF1 HD"
 bfm = "BFM TV"
 ```
 Then: `formuler-remote --json --first tune tf1`
+
+### Debugging
+
+```bash
+formuler-remote --dry-run play-series "breaking bad" 2 3   # preview ADB commands
+formuler-remote --verbose --json --first tune "TF1"        # see ADB commands + execute
+```
 
 ## JSON Output Format
 
@@ -142,6 +173,16 @@ The device IP must be set via one of:
 - `.env` file with `FORMULER_IP=<ip>`
 - `~/.config/formuler-remote/config.toml` or `config.json`
 - First CLI argument: `formuler-remote --json 192.168.0.100 status`
+
+## Configurable Timing
+
+Device navigation speed can be tuned in config:
+```toml
+[timing]
+nav_delay = 0.25    # seconds between key presses (default 0.25)
+load_delay = 2.0    # seconds after opening screens (default 2.0)
+search_delay = 1.5  # seconds after search input (default 1.5)
+```
 
 ## Key Names
 

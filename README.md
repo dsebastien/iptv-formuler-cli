@@ -13,8 +13,11 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 - **Favorites** — toggle star on any content from the CLI
 - **EPG** — view program guide, search EPG listings
 - **Channel database** — local cache with full enumeration (A-Z prefix scan)
-- **Fuzzy matching** — accent-insensitive, partial name matching ("tf1" matches "TF 1")
+- **Fuzzy matching** — accent-insensitive, partial name matching ("tf1" matches "TF 1"), shorter names preferred
 - **Channel aliases** — configure shortcuts in config file
+- **Tune history** — `last`/`prev` for quick channel switching, persistent history
+- **Command chaining** — chain commands with `;` in a single invocation
+- **Sleep timer** — auto power-off after N minutes or at a specific time
 - **Macros** — save and replay command sequences
 - **Timed actions** — schedule commands at specific times
 - **Batch mode** — pipe multiple commands via stdin for automation
@@ -24,11 +27,13 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 - **Claude Code skill** — included skill for AI-driven TV control
 - **Auto-reconnect** — handles dropped ADB connections transparently
 - **Retry logic** — exponential backoff on transient ADB errors
+- **Dry-run mode** — preview ADB commands without executing
 - **CEC control** — power TV on/off through the Formuler box
 - **Screen capture** — screenshots and screen recording
 - **M3U export** — export channel lineup as M3U playlist
 - **Shell completions** — bash, zsh, and fish completion scripts
-- **Config file** — customizable IP, macros, aliases, cache settings
+- **Configurable timing** — tune navigation delays for your device speed
+- **Config file** — customizable IP, macros, aliases, timing, cache settings
 
 ## Prerequisites
 
@@ -126,6 +131,19 @@ formuler-remote section vod               # switch to VOD section
 formuler-remote up                        # send key press
 formuler-remote ok                        # send OK/Enter
 
+# Channel switching
+formuler-remote last                      # retune last channel
+formuler-remote prev                      # swap to previous channel
+formuler-remote tune-history              # show tune history
+
+# Sleep timer
+formuler-remote sleep-timer 90            # auto-off in 90 minutes
+formuler-remote sleep-at 23:30            # auto-off at 11:30 PM
+formuler-remote sleep-cancel              # cancel sleep timer
+
+# Command chaining
+formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'
+
 # Convenience
 formuler-remote wake                      # CEC wakeup + launch MyTV
 formuler-remote power-off                 # CEC sleep + disconnect
@@ -140,6 +158,18 @@ formuler-remote
 ```
 
 Features tab completion, command history (persisted across sessions), and colored output. Type `help` for the full command reference.
+
+### Command Chaining
+
+Chain multiple commands with `;` in a single invocation:
+
+```bash
+formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'
+formuler-remote --json --first 'volume-up ; volume-up ; volume-up'
+formuler-remote --json --first 'wake ; tune BFM TV ; wait 3 ; screenshot'
+```
+
+`wait N` is handled inline within chains. This avoids multiple subprocess calls and reconnect overhead.
 
 ### Batch Mode
 
@@ -169,6 +199,8 @@ EOF
 | `--wait <N>` | Sleep N seconds after command completes |
 | `--timeout <N>` | Override default ADB timeout (default 10s) |
 | `--verbose` / `--debug` | Print ADB commands to stderr for debugging |
+| `--dry-run` | Show ADB commands without executing (implies `--verbose`) |
+| `-V` / `--version` | Print version and exit |
 | `-h` / `--help` | Show usage information and exit |
 | `--completions <shell>` | Print shell completion script (bash/zsh/fish) |
 
@@ -183,6 +215,9 @@ EOF
 | **Sections** | `section <name>` | Switch section (live/vod/series/radio/recordings) |
 | | `browse <section>` | Open section for browsing |
 | **Live TV** | `tune <name\|number>` | Tune by name or channel number (fuzzy match) |
+| | `last` | Retune last channel |
+| | `prev` | Swap to previous channel |
+| | `tune-history` | Show tune history |
 | | `search <query>` | Search local DB + device |
 | | `list [filter]` | List favorites/history |
 | | `list-all [filter]` | List all enumerated channels |
@@ -203,6 +238,9 @@ EOF
 | **Favorites** | `star` | Toggle star on current page |
 | | `star-vod <query>` | Find movie & toggle star |
 | | `star-series <query>` | Find series & toggle star |
+| **Sleep Timer** | `sleep-timer <minutes>` | Auto power-off after N minutes |
+| | `sleep-at <HH:MM>` | Auto power-off at specific time |
+| | `sleep-cancel` | Cancel sleep timer |
 | **Macros** | `macro <name>` | Run a saved macro |
 | | `macros` | List available macros |
 | | `at <HH:MM> <command>` | Schedule a command |
@@ -272,11 +310,26 @@ On error:
 - `0` — success
 - `1` — error (command failed, device not found, etc.)
 
+### Command chaining for agents
+
+Chain commands with `;` to avoid multiple subprocess calls:
+```bash
+formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'
+```
+
 ### Batch mode for agents
 
 Send multiple commands in a single invocation:
 ```bash
 echo -e "ping\ntune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
+```
+
+### Debugging
+
+Preview ADB commands without executing:
+```bash
+formuler-remote --dry-run tune "TF1"           # preview commands
+formuler-remote --verbose --json --first tune "TF1"  # see + execute
 ```
 
 ### Claude Code skill
@@ -338,6 +391,11 @@ port = 5555
 [cache]
 channels_max_age_hours = 24
 
+[timing]
+nav_delay = 0.25
+load_delay = 2.0
+search_delay = 1.5
+
 [aliases]
 tf1 = "TF1 HD"
 bfm = "BFM TV"
@@ -354,6 +412,7 @@ JSON equivalent (`config.json`):
 {
   "device": {"ip": "192.168.0.100", "port": 5555},
   "cache": {"channels_max_age_hours": 24},
+  "timing": {"nav_delay": 0.25, "load_delay": 2.0, "search_delay": 1.5},
   "aliases": {"tf1": "TF1 HD", "bfm": "BFM TV"},
   "macros": {
     "morning": "open mytv; wait 3; tune BFM TV",
@@ -373,6 +432,19 @@ bfm = "BFM TV"
 ```
 
 Then use the alias: `formuler-remote tune tf1` will tune to "TF1 HD".
+
+### Configurable Timing
+
+Device navigation speed can be tuned in the `[timing]` section of your config file:
+
+```toml
+[timing]
+nav_delay = 0.25    # seconds between key presses (default 0.25)
+load_delay = 2.0    # seconds after opening screens (default 2.0)
+search_delay = 1.5  # seconds after search input (default 1.5)
+```
+
+Useful if your device responds faster or slower than the defaults.
 
 ### Fuzzy Matching
 
