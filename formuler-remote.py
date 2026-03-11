@@ -1388,6 +1388,10 @@ def cmd_episodes(ip: str, query: str):
 
 
 def cmd_resume(ip: str, content_type: str = "vod"):
+    """Resume the last played content of the given type.
+
+    Uses cached intents for instant launch (no UI navigation).
+    """
     channels = get_channels(ip, force_refresh=True)
     history_cat = {"vod": "VOD History", "series": "Series History", "live": "Live History"}
     cat_name = history_cat.get(content_type, "")
@@ -1400,12 +1404,18 @@ def cmd_resume(ip: str, content_type: str = "vod"):
     output_ok(f"Resuming: {last['title']}", last)
     _notify("Formuler Remote", f"Resuming: {last['title']}")
 
-    if content_type == "live" and last.get("intent"):
-        tune_by_intent(ip, last["intent"])
-    else:
-        do_search(ip, last["title"], section=content_type)
-        select_first_result(ip)
-        key(ip, "ok")  # Reprendre / Regarder
+    # Fast path: launch via cached intent (works for all content types)
+    if last.get("intent"):
+        launch_intent(ip, last["intent"])
+        return
+
+    # Slow path: UI search
+    do_search(ip, last["title"], section=content_type)
+    select_first_result(ip)
+    if content_type == "vod":
+        key(ip, "down")  # description → "Regarder"
+    wait(NAV_DELAY)
+    key(ip, "ok")
 
 
 def cmd_info(ip: str, query: str, content_type: str = ""):
@@ -1540,29 +1550,7 @@ def cmd_now_playing(ip: str):
             warn("No media currently playing")
 
 
-def _parse_content_rows(output: str) -> list[dict]:
-    """Parse Android content query output into list of dicts."""
-    rows = []
-    for line in output.splitlines():
-        if not line.startswith("Row:"):
-            continue
-        row = {}
-        # Parse key=value pairs (values may contain = signs)
-        parts = line.split(", ")
-        for part in parts:
-            eq = part.find("=")
-            if eq > 0:
-                key = part[:eq].strip()
-                # Clean up "Row: N " prefix from first key
-                if key.startswith("Row:"):
-                    key = key.split()[-1]
-                val = part[eq + 1:].strip()
-                if val == "NULL":
-                    val = None
-                row[key] = val
-        if row:
-            rows.append(row)
-    return rows
+    # _parse_content_rows is defined earlier (near content provider helpers)
 
 
 # ══════════════════════════════════════════════════════════════
