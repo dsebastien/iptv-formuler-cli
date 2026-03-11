@@ -216,6 +216,51 @@ check_path() {
     echo "Then restart your shell or run: source ${rc_file}"
 }
 
+# ── uninstall ────────────────────────────────────────────
+
+uninstall() {
+    echo ""
+    bold "Formuler Remote CLI — Uninstaller"
+    echo ""
+
+    # Remove script and symlink
+    if [ -f "${INSTALL_DIR}/${SCRIPT_NAME}" ]; then
+        rm -f "${INSTALL_DIR}/${SCRIPT_NAME}"
+        info "Removed ${INSTALL_DIR}/${SCRIPT_NAME}"
+    fi
+    if [ -L "${INSTALL_DIR}/formuler-remote" ]; then
+        rm -f "${INSTALL_DIR}/formuler-remote"
+        info "Removed symlink ${INSTALL_DIR}/formuler-remote"
+    fi
+
+    # Remove skill
+    if [ -d "$SKILL_DIR" ]; then
+        rm -rf "$SKILL_DIR"
+        info "Removed skill directory ${SKILL_DIR}"
+    fi
+
+    # Optionally remove config and cache
+    local config_dir="${HOME}/.config/formuler-remote"
+    local cache_dir="${HOME}/.cache/formuler-remote"
+
+    if [ -d "$config_dir" ] || [ -d "$cache_dir" ]; then
+        printf "Remove config and cache directories? [y/N] "
+        read -r answer </dev/tty
+        case "$answer" in
+            [yY]*)
+                [ -d "$config_dir" ] && rm -rf "$config_dir" && info "Removed $config_dir"
+                [ -d "$cache_dir" ] && rm -rf "$cache_dir" && info "Removed $cache_dir"
+                ;;
+            *)
+                info "Kept config/cache directories."
+                ;;
+        esac
+    fi
+
+    echo ""
+    info "Uninstall complete."
+}
+
 # ── main ─────────────────────────────────────────────────
 
 main() {
@@ -257,4 +302,8 @@ main() {
     echo ""
 }
 
-main
+# Dispatch: --uninstall or install
+case "${1:-}" in
+    --uninstall) uninstall ;;
+    *)           main ;;
+esac

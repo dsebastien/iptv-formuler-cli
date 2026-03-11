@@ -13,9 +13,13 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 1. ALWAYS use `--json --first` flags for non-interactive operation
 2. ALWAYS add `--yes` when running destructive commands (reboot)
 3. Check exit code — 0 means success, non-zero means failure
-4. Parse the JSON envelope: `{"ok": true, "data": ...}` or `{"ok": false, "error": "..."}`
+4. Parse the JSON envelope: `{"ok": true, "message": "...", "data": ...}` or `{"ok": false, "error": "..."}`
 5. Run `formuler-remote --json commands` to discover available commands before guessing
 6. NEVER run the CLI without flags in a non-interactive context (it launches a REPL)
+7. All commands now return proper JSON in `--json` mode (no silent no-ops)
+8. Use `ping` to verify device connectivity before running commands
+9. Channel names support fuzzy matching — "tf1" matches "TF 1", accents are ignored
+10. Channel aliases can be configured in the config file under `[aliases]`
 
 ## Quick Reference
 
@@ -29,14 +33,38 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 | List all channels | `formuler-remote --json list-all` |
 | Channel info | `formuler-remote --json channel-info 42` |
 | Device status | `formuler-remote --json status` |
+| Ping device | `formuler-remote --json ping` |
 | Screenshot | `formuler-remote --json screenshot /tmp/screen.png` |
 | EPG info | `formuler-remote --json epg` |
 | Open guide | `formuler-remote --json guide` |
 | Resume last | `formuler-remote --json --first resume vod` |
+| Wake device | `formuler-remote --json wake` |
+| Power off | `formuler-remote --json power-off` |
+| Export M3U | `formuler-remote --json export-m3u channels.m3u` |
+| Watch screenshots | `formuler-remote --json watch 5 /tmp` |
 | List commands | `formuler-remote --json commands` |
 | Send key | `formuler-remote --json ok` |
 | Navigate | `formuler-remote --json up` / `down` / `left` / `right` |
 | Volume | `formuler-remote --json volume-up` / `volume-down` / `mute` |
+
+## Flags
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Structured JSON output |
+| `--first` | Auto-select first match |
+| `--yes` | Skip confirmation prompts |
+| `--wait <N>` | Sleep N seconds after command |
+| `--timeout <N>` | Override ADB timeout (default 10s) |
+| `--verbose` | Print ADB commands to stderr |
+
+## Batch Mode
+
+Pipe multiple commands via stdin (one per line, `#` for comments):
+
+```bash
+echo -e "tune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
+```
 
 ## Workflow
 
@@ -46,7 +74,7 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
    ```bash
    formuler-remote --json search "TF1"
    ```
-2. Tune using the result:
+2. Tune using the result (fuzzy matching handles partial names):
    ```bash
    formuler-remote --json --first tune "TF1"
    ```
@@ -86,11 +114,21 @@ formuler-remote --json macros          # list available
 formuler-remote --json macro morning   # run one
 ```
 
+### Channel aliases
+
+Configure aliases in `~/.config/formuler-remote/config.toml`:
+```toml
+[aliases]
+tf1 = "TF1 HD"
+bfm = "BFM TV"
+```
+Then: `formuler-remote --json --first tune tf1`
+
 ## JSON Output Format
 
 All commands with `--json` return:
 ```json
-{"ok": true, "data": <command-specific>, "message": "Human-readable status"}
+{"ok": true, "message": "Human-readable status", "data": <command-specific>}
 ```
 On error:
 ```json

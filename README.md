@@ -7,22 +7,28 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 ## Features
 
 - **Full remote control** — all keys: navigation, playback, volume, channels, digits
-- **Live TV** — tune by name or channel number, search channels, fuzzy matching
+- **Live TV** — tune by name or channel number, fuzzy matching, channel aliases
 - **VOD** — search and play movies with a single command
 - **Series** — play specific episodes (e.g., S2E5), browse seasons
 - **Favorites** — toggle star on any content from the CLI
 - **EPG** — view program guide, search EPG listings
 - **Channel database** — local cache with full enumeration (A-Z prefix scan)
+- **Fuzzy matching** — accent-insensitive, partial name matching ("tf1" matches "TF 1")
+- **Channel aliases** — configure shortcuts in config file
 - **Macros** — save and replay command sequences
 - **Timed actions** — schedule commands at specific times
+- **Batch mode** — pipe multiple commands via stdin for automation
 - **Interactive REPL** — tab completion, command history, colored output
 - **JSON output** — `--json` flag for scripting and integration
 - **Agent-friendly** — structured JSON envelope, `--first`/`--yes` flags, exit codes, command schema
 - **Claude Code skill** — included skill for AI-driven TV control
 - **Auto-reconnect** — handles dropped ADB connections transparently
+- **Retry logic** — exponential backoff on transient ADB errors
 - **CEC control** — power TV on/off through the Formuler box
 - **Screen capture** — screenshots and screen recording
-- **Config file** — customizable IP, macros, cache settings
+- **M3U export** — export channel lineup as M3U playlist
+- **Shell completions** — bash, zsh, and fish completion scripts
+- **Config file** — customizable IP, macros, aliases, cache settings
 
 ## Prerequisites
 
@@ -64,6 +70,17 @@ mkdir -p ~/.claude/skills/formuler-remote
 cp .claude/skills/formuler-remote/SKILL.md ~/.claude/skills/formuler-remote/
 ```
 
+## Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/install.sh | bash -s -- --uninstall
+```
+
+Or if you have the repo cloned:
+```bash
+./install.sh --uninstall
+```
+
 ## Quick Start
 
 ```bash
@@ -88,7 +105,7 @@ formuler-remote play-series "breaking bad" 2 3   # S02E03
 
 ```bash
 # Live TV
-formuler-remote tune "BFM TV"             # tune by name
+formuler-remote tune "BFM TV"             # tune by name (fuzzy match)
 formuler-remote tune 42                   # tune by channel number (requires refresh-all)
 formuler-remote search france             # search channels
 
@@ -108,6 +125,12 @@ formuler-remote star-vod batman           # find & star a movie
 formuler-remote section vod               # switch to VOD section
 formuler-remote up                        # send key press
 formuler-remote ok                        # send OK/Enter
+
+# Convenience
+formuler-remote wake                      # CEC wakeup + launch MyTV
+formuler-remote power-off                 # CEC sleep + disconnect
+formuler-remote ping                      # check device connectivity
+formuler-remote export-m3u channels.m3u   # export channel lineup
 ```
 
 ### Interactive Mode
@@ -118,13 +141,36 @@ formuler-remote
 
 Features tab completion, command history (persisted across sessions), and colored output. Type `help` for the full command reference.
 
+### Batch Mode
+
+Pipe commands via stdin for automation (one command per line, `#` for comments):
+
+```bash
+echo -e "tune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
+```
+
+```bash
+cat <<EOF | formuler-remote --json --first
+# Morning routine
+wake
+tune BFM TV
+wait 5
+screenshot /tmp/morning.png
+EOF
+```
+
 ### Flags
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Structured JSON output (`{"ok": bool, "data"\|"error": ...}`) |
+| `--json` | Structured JSON output (`{"ok": bool, "message"\|"error": ...}`) |
 | `--first` | Auto-select first match instead of prompting |
 | `--yes` | Skip confirmation prompts (e.g., reboot) |
+| `--wait <N>` | Sleep N seconds after command completes |
+| `--timeout <N>` | Override default ADB timeout (default 10s) |
+| `--verbose` / `--debug` | Print ADB commands to stderr for debugging |
+| `-h` / `--help` | Show usage information and exit |
+| `--completions <shell>` | Print shell completion script (bash/zsh/fish) |
 
 ### Command Reference
 
@@ -136,7 +182,7 @@ Features tab completion, command history (persisted across sessions), and colore
 | **Channels** | `channel-up`, `channel-down`, `channel <number>` | Channel navigation |
 | **Sections** | `section <name>` | Switch section (live/vod/series/radio/recordings) |
 | | `browse <section>` | Open section for browsing |
-| **Live TV** | `tune <name\|number>` | Tune by name or channel number |
+| **Live TV** | `tune <name\|number>` | Tune by name or channel number (fuzzy match) |
 | | `search <query>` | Search local DB + device |
 | | `list [filter]` | List favorites/history |
 | | `list-all [filter]` | List all enumerated channels |
@@ -162,6 +208,11 @@ Features tab completion, command history (persisted across sessions), and colore
 | | `at <HH:MM> <command>` | Schedule a command |
 | | `timers` | List pending timers |
 | | `cancel-timer <index>` | Cancel a timer |
+| **Export** | `export-m3u [path]` | Export channel lineup as M3U file |
+| **Convenience** | `wake` | CEC wakeup + launch MyTVOnline |
+| | `power-off` | CEC sleep + disconnect |
+| | `history [count]` | Show recent command history |
+| | `watch [interval] [dir]` | Screenshot every N seconds |
 | **Advanced** | `repeat <key> <count>` | Press key N times |
 | | `cec <on\|off\|standby>` | TV power via CEC |
 | | `record [duration] [path]` | Screen record |
@@ -170,6 +221,7 @@ Features tab completion, command history (persisted across sessions), and colore
 | | `apps` | List installed apps |
 | | `screenshot [path]` | Capture screen |
 | | `status` | Show device info |
+| | `ping` | Check device connectivity |
 | | `reboot` | Reboot device |
 | | `refresh` | Reload favorites/history cache |
 | | `refresh-all` | Rebuild full channel database |
@@ -197,6 +249,9 @@ formuler-remote --json --yes reboot
 
 # Discover all commands programmatically
 formuler-remote --json commands
+
+# Check connectivity before running commands
+formuler-remote --json ping
 ```
 
 ### JSON output format
@@ -204,7 +259,7 @@ formuler-remote --json commands
 All commands with `--json` return a consistent envelope:
 
 ```json
-{"ok": true, "data": {"title": "BFM TV", ...}, "message": "Tuning to: BFM TV"}
+{"ok": true, "message": "Tuning to: BFM TV", "data": {"title": "BFM TV", ...}}
 ```
 
 On error:
@@ -216,6 +271,13 @@ On error:
 
 - `0` — success
 - `1` — error (command failed, device not found, etc.)
+
+### Batch mode for agents
+
+Send multiple commands in a single invocation:
+```bash
+echo -e "ping\ntune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
+```
 
 ### Claude Code skill
 
@@ -233,6 +295,21 @@ To install the skill manually:
 mkdir -p ~/.claude/skills/formuler-remote
 curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/.claude/skills/formuler-remote/SKILL.md \
   -o ~/.claude/skills/formuler-remote/SKILL.md
+```
+
+## Shell Completions
+
+Generate and install completion scripts:
+
+```bash
+# Bash
+formuler-remote --completions bash >> ~/.bashrc
+
+# Zsh
+formuler-remote --completions zsh >> ~/.zshrc
+
+# Fish
+formuler-remote --completions fish > ~/.config/fish/completions/formuler-remote.fish
 ```
 
 ## Configuration
@@ -261,6 +338,11 @@ port = 5555
 [cache]
 channels_max_age_hours = 24
 
+[aliases]
+tf1 = "TF1 HD"
+bfm = "BFM TV"
+france2 = "France 2 HD"
+
 [macros]
 morning = "open mytv; wait 3; tune BFM TV"
 news = "tune BFM TV"
@@ -272,6 +354,7 @@ JSON equivalent (`config.json`):
 {
   "device": {"ip": "192.168.0.100", "port": 5555},
   "cache": {"channels_max_age_hours": 24},
+  "aliases": {"tf1": "TF1 HD", "bfm": "BFM TV"},
   "macros": {
     "morning": "open mytv; wait 3; tune BFM TV",
     "news": "tune BFM TV"
@@ -279,12 +362,34 @@ JSON equivalent (`config.json`):
 }
 ```
 
+### Channel Aliases
+
+Define aliases in the `[aliases]` section of your config file to create shortcuts for channel names:
+
+```toml
+[aliases]
+tf1 = "TF1 HD"
+bfm = "BFM TV"
+```
+
+Then use the alias: `formuler-remote tune tf1` will tune to "TF1 HD".
+
+### Fuzzy Matching
+
+Channel names support fuzzy matching:
+- Accent-insensitive: "francais" matches "Fran\u00e7ais"
+- Space-insensitive: "tf1" matches "TF 1"
+- Partial match: "france" matches "France 2 HD", "France 3", etc.
+- Token matching: "bfm tv" matches "BFM TV HD"
+
 ## How It Works
 
 - **Transport**: ADB (Android Debug Bridge) over TCP/IP — no USB cable needed
 - **Live TV**: Deep link intents to the MyTVOnline app for instant channel switching
 - **VOD/Series**: UI automation via ADB key events (search -> select -> play)
 - **Channel data**: Content providers (`formuler.media.tv` for favorites/history, `searchProvider` for full channel list)
+- **Retry logic**: Transient ADB errors are retried with exponential backoff (0.5s, 1s, 2s)
+- **Instance lock**: Only one CLI instance can run at a time (fcntl file lock)
 - **No root required**: Standard ADB debugging is sufficient
 - **No credentials**: Channel tuning uses device intents, not IPTV credentials
 
@@ -299,6 +404,7 @@ Developed and tested on **Formuler Z11 Pro MAX** running Android 11 with MyTVOnl
 - **Search provider returns max ~10 results** per query
 - **EPG data cannot be extracted programmatically** — the EPG commands open the UI and take screenshots
 - **Device UI is in French** — the script handles French-language UI elements
+- **M3U export has no stream URLs** — only channel metadata (the CLI uses intents, not direct streams)
 
 ## License
 

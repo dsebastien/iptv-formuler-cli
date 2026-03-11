@@ -40,6 +40,7 @@ Prerequisites:
 """
 
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -48,6 +49,7 @@ import sys
 import shutil
 import threading
 import time
+import unicodedata
 import readline  # arrow-key history in interactive mode
 from pathlib import Path
 
@@ -133,6 +135,8 @@ FULL_CHANNELS_CACHE = CACHE_DIR / "full_channels.json"
 JSON_MODE = False
 AUTO_YES = False
 AUTO_FIRST = False
+VERBOSE = False
+ADB_TIMEOUT = 10
 
 KEYS = {
     "power": 26, "home": 3, "back": 4, "menu": 82,
@@ -177,6 +181,43 @@ SEARCH_PREFIXES = (
     + list("0123456789")
     + ["|BE|", "|FR|", "|NL|", "|UK|", "|US|", "|DE|", "|ES|", "|IT|", "|PT|"]
 )
+
+
+# ──────────────────────── Fuzzy Matching ────────────────────────
+
+
+def _normalize(s: str) -> str:
+    """Strip accents, lowercase, collapse whitespace."""
+    nfkd = unicodedata.normalize("NFKD", s)
+    stripped = "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    return " ".join(stripped.lower().split())
+
+
+def _fuzzy_match(query: str, candidates: list[dict], key: str = "title") -> list[dict]:
+    """Match query against candidates with tiered matching.
+
+    Priority: exact > starts-with > all-tokens-contained > spaces-removed containment.
+    """
+    nq = _normalize(query)
+    nq_nospace = nq.replace(" ", "")
+    tokens = nq.split()
+
+    exact, starts, contains, spaceless = [], [], [], []
+    for item in candidates:
+        val = item.get(key, "")
+        nv = _normalize(val)
+        nv_nospace = nv.replace(" ", "")
+        if nv == nq:
+            exact.append(item)
+        elif nv.startswith(nq):
+            starts.append(item)
+        elif all(t in nv for t in tokens):
+            contains.append(item)
+        elif nq_nospace in nv_nospace:
+            spaceless.append(item)
+
+    return exact + starts + contains + spaceless
+
 
 # ──────────────────────── Command Registry ────────────────────────
 # Machine-readable command schema for AI agents and scripting
@@ -256,6 +297,12 @@ COMMANDS = {
     "screenshot": {"args": "[path]", "desc": "Capture screen to file (default /tmp/formuler-screenshot.png)"},
     "status": {"args": "", "desc": "Show device info (model, Android version, uptime, foreground app)"},
     "reboot": {"args": "", "desc": "Reboot device (requires --yes to skip confirmation)"},
+    "export-m3u": {"args": "[path]", "desc": "Export channel lineup as M3U playlist (metadata only, no stream URLs)"},
+    "wake": {"args": "", "desc": "CEC wakeup + launch MyTVOnline"},
+    "power-off": {"args": "", "desc": "CEC sleep + disconnect"},
+    "history": {"args": "[count]", "desc": "Show recent command history"},
+    "watch": {"args": "[interval] [dir]", "desc": "Take screenshot every N seconds (default 5)"},
+    "ping": {"args": "", "desc": "Check device connectivity (adb shell echo pong)"},
     "commands": {"args": "", "desc": "List all commands with args and descriptions (JSON schema)"},
     "keys": {"args": "", "desc": "List all remote key names"},
     "help": {"args": "", "desc": "Show help text"},
@@ -344,14 +391,40 @@ def tgt(ip: str) -> str:
     return f"{ip}:{ADB_PORT}"
 
 
-def adb(ip: str, *args: str, timeout: int = 10) -> tuple[int, str]:
+def adb(ip: str, *args: str, timeout: int = 0) -> tuple[int, str]:
     """Run ADB command with auto-reconnect on connection loss."""
+    if timeout == 0:
+        timeout = ADB_TIMEOUT
+    if VERBOSE:
+        print(f"[debug] adb -s {tgt(ip)} {' '.join(args)}", file=sys.stderr)
     code, out = run_adb("-s", tgt(ip), *args, timeout=timeout)
     if code != 0 and ("error: device" in out.lower() or "not found" in out.lower()
                        or "offline" in out.lower()):
         warn("Connection lost. Reconnecting...")
         if connect(ip, quiet=True):
             code, out = run_adb("-s", tgt(ip), *args, timeout=timeout)
+    if VERBOSE:
+        print(f"[debug] exit={code}", file=sys.stderr)
+    return code, out
+
+
+_TRANSIENT_ERRORS = ("timeout", "device busy", "closed", "connection reset", "broken pipe")
+
+
+def _adb_retry(ip: str, *args: str, timeout: int = 10, max_attempts: int = 3) -> tuple[int, str]:
+    """Run ADB command with exponential backoff retry on transient errors."""
+    delays = [0.5, 1.0, 2.0]
+    for attempt in range(max_attempts):
+        code, out = adb(ip, *args, timeout=timeout)
+        if code == 0:
+            return code, out
+        out_lower = out.lower()
+        if not any(err in out_lower for err in _TRANSIENT_ERRORS):
+            return code, out  # non-transient error, don't retry
+        if attempt < max_attempts - 1:
+            delay = delays[min(attempt, len(delays) - 1)]
+            warn(f"Transient error (attempt {attempt + 1}/{max_attempts}), retrying in {delay}s...")
+            time.sleep(delay)
     return code, out
 
 
@@ -371,7 +444,10 @@ def key(ip: str, name: str) -> bool:
     if name not in KEYS:
         error(f"Unknown key: {name}")
         return False
-    adb(ip, "shell", "input", "keyevent", str(KEYS[name]))
+    code, out = adb(ip, "shell", "input", "keyevent", str(KEYS[name]))
+    if code != 0:
+        output_err(f"Key '{name}' failed: {out}")
+        return False
     return True
 
 
@@ -416,9 +492,9 @@ def open_app(ip: str, package: str):
     code, out = adb(ip, "shell", "monkey", "-p", package,
                     "-c", "android.intent.category.LAUNCHER", "1")
     if code != 0 or "No activities found" in out:
-        error(f"Error launching {package}: {out}")
+        output_err(f"Error launching {package}: {out}")
     else:
-        info(f"Launched {package}")
+        output_ok(f"Launched {package}")
 
 
 def list_apps(ip: str):
@@ -451,7 +527,7 @@ def go_to_section(ip: str, section: str) -> bool:
         wait(0.2)
     key(ip, "ok")
     wait(1.5)
-    info(f"Switched to: {section}")
+    output_ok(f"Switched to: {section}")
     return True
 
 
@@ -476,7 +552,7 @@ def do_search(ip: str, query: str, section: str = "vod"):
     wait(0.5)
     key(ip, "ok")
     wait(2)
-    info(f"Searched for '{query}' in {section}")
+    output_ok(f"Searched for '{query}' in {section}")
 
 
 def select_first_result(ip: str):
@@ -496,7 +572,7 @@ def stop_playback(ip: str):
     key(ip, "up")
     wait(0.2)
     key(ip, "ok")
-    info("Playback stopped.")
+    output_ok("Playback stopped.")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -508,7 +584,7 @@ def play_movie(ip: str, query: str):
     select_first_result(ip)
     key(ip, "ok")
     wait(1)
-    info(f"Playing movie: '{query}'")
+    output_ok(f"Playing movie: '{query}'", {"query": query})
     _notify("Formuler Remote", f"Playing: {query}")
 
 
@@ -545,7 +621,7 @@ def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     key(ip, "ok")
     wait(1)
     label = f"'{query}' S{season:02d}E{episode:02d}"
-    info(f"Playing {label}")
+    output_ok(f"Playing {label}", {"query": query, "season": season, "episode": episode})
     _notify("Formuler Remote", f"Playing: {label}")
 
 
@@ -559,7 +635,7 @@ def toggle_star(ip: str):
     key(ip, "ok")
     wait(0.5)
     keys(ip, "left", "left", "left", "left", delay=0.15)
-    info("Star toggled.")
+    output_ok("Star toggled.")
 
 
 def star_search(ip: str, query: str, content_type: str = "vod"):
@@ -568,7 +644,7 @@ def star_search(ip: str, query: str, content_type: str = "vod"):
     toggle_star(ip)
     key(ip, "back")
     wait(0.5)
-    info(f"Toggled star for '{query}'")
+    output_ok(f"Toggled star for '{query}'")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -592,7 +668,7 @@ def _parse_content_rows(raw: str) -> list[dict]:
 def fetch_channels(ip: str) -> list[dict]:
     if not JSON_MODE:
         print("Fetching channels from device...", end="", flush=True)
-    code, out = adb(
+    code, out = _adb_retry(
         ip, "shell", "content", "query",
         "--uri", "content://formuler.media.tv/preview_program",
         "--projection", "title:content_id:channel_id:poster_art_uri:intent_uri:short_description",
@@ -621,7 +697,7 @@ def fetch_channels(ip: str) -> list[dict]:
 
 
 def search_provider(ip: str, query: str) -> list[dict]:
-    code, out = adb(
+    code, out = _adb_retry(
         ip, "shell", "content", "query",
         "--uri", f"content://tv.formuler.mol3.real.searchProvider/search_suggest_query/{query}",
         timeout=15
@@ -732,6 +808,10 @@ def _tune_by_uid(ip: str, unique_id: str) -> bool:
 
 
 def cmd_tune(ip: str, query: str):
+    # Resolve aliases
+    aliases = CONFIG.get("aliases", {})
+    query = aliases.get(query.lower(), query)
+
     # Try full channel cache first
     if FULL_CHANNELS_CACHE.exists():
         with open(FULL_CHANNELS_CACHE) as f:
@@ -740,17 +820,16 @@ def cmd_tune(ip: str, query: str):
         if query.isdigit():
             for ch in full:
                 if ch.get("number") == query:
-                    info(f"Tuning to: {ch['title']} (#{query})")
+                    output_ok(f"Tuning to: {ch['title']} (#{query})", ch)
                     _notify("Formuler Remote", f"Tuning: {ch['title']}")
                     if ch.get("unique_id"):
                         _tune_by_uid(ip, ch["unique_id"])
                     return
-        # Try name match in full cache
-        terms = query.lower().split()
-        full_matches = [c for c in full if all(t in c["title"].lower() for t in terms)]
+        # Try fuzzy match in full cache
+        full_matches = _fuzzy_match(query, full)
         if len(full_matches) == 1 or (full_matches and all(m["title"] == full_matches[0]["title"] for m in full_matches)):
             ch = full_matches[0]
-            info(f"Tuning to: {ch['title']}")
+            output_ok(f"Tuning to: {ch['title']}", ch)
             _notify("Formuler Remote", f"Tuning: {ch['title']}")
             if ch.get("unique_id"):
                 _tune_by_uid(ip, ch["unique_id"])
@@ -761,8 +840,7 @@ def cmd_tune(ip: str, query: str):
 
     # Fallback to favorites/history cache
     channels = get_channels(ip)
-    terms = query.lower().split()
-    matches = [c for c in channels if all(t in c["title"].lower() for t in terms)]
+    matches = _fuzzy_match(query, channels)
     live = [m for m in matches if m["category"] in ("Favorites", "Live History")]
     if live:
         matches = live
@@ -771,19 +849,19 @@ def cmd_tune(ip: str, query: str):
         results = search_provider(ip, query)
         if results:
             r = results[0]
-            info(f"Tuning to: {r['title']}")
+            output_ok(f"Tuning to: {r['title']}", r)
             _notify("Formuler Remote", f"Tuning: {r['title']}")
             if r.get("unique_id"):
                 _tune_by_uid(ip, r["unique_id"])
                 return
-            error("No unique ID found")
+            output_err("No unique ID found")
         else:
             error(f"No channel matching '{query}'")
         return
 
     if len(matches) == 1 or all(m["title"] == matches[0]["title"] for m in matches):
         ch = matches[0]
-        info(f"Tuning to: {ch['title']}")
+        output_ok(f"Tuning to: {ch['title']}", ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if ch.get("intent"):
             tune_by_intent(ip, ch["intent"])
@@ -795,10 +873,7 @@ def cmd_tune(ip: str, query: str):
 def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
     if AUTO_FIRST or JSON_MODE:
         ch = matches[0]
-        if JSON_MODE:
-            output_ok(f"Tuning to: {ch['title']}", ch)
-        else:
-            info(f"Tuning to: {ch['title']}")
+        output_ok(f"Tuning to: {ch['title']}", ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if is_full and ch.get("unique_id"):
             _tune_by_uid(ip, ch["unique_id"])
@@ -819,7 +894,7 @@ def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
     idx = int(choice) - 1 if choice.isdigit() else 0
     if 0 <= idx < len(matches):
         ch = matches[idx]
-        info(f"Tuning to: {ch['title']}")
+        output_ok(f"Tuning to: {ch['title']}", ch)
         _notify("Formuler Remote", f"Tuning: {ch['title']}")
         if is_full and ch.get("unique_id"):
             _tune_by_uid(ip, ch["unique_id"])
@@ -829,8 +904,7 @@ def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
 
 def cmd_search(ip: str, query: str):
     channels = get_channels(ip)
-    terms = query.lower().split()
-    cached = [c for c in channels if all(t in c["title"].lower() for t in terms)]
+    cached = _fuzzy_match(query, channels)
     device = search_provider(ip, query)
 
     if JSON_MODE:
@@ -852,10 +926,7 @@ def cmd_search(ip: str, query: str):
 
 def cmd_list(ip: str, filter_text: str = ""):
     channels = get_channels(ip)
-    filtered = channels
-    if filter_text:
-        terms = filter_text.lower().split()
-        filtered = [c for c in filtered if all(t in c["title"].lower() for t in terms)]
+    filtered = _fuzzy_match(filter_text, channels) if filter_text else channels
 
     if JSON_MODE:
         output(filtered or [])
@@ -874,8 +945,7 @@ def cmd_list(ip: str, filter_text: str = ""):
 def cmd_list_all(ip: str, filter_text: str = ""):
     channels = get_full_channels(ip)
     if filter_text:
-        terms = filter_text.lower().split()
-        channels = [c for c in channels if all(t in c["title"].lower() for t in terms)]
+        channels = _fuzzy_match(filter_text, channels)
 
     if JSON_MODE:
         output(channels)
@@ -921,7 +991,7 @@ def cmd_categories(ip: str):
 
 def cmd_browse(ip: str, section: str):
     go_to_section(ip, section)
-    info(f"Browsing {section}. Use arrow keys to navigate, 'back' to return.")
+    output_ok(f"Browsing {section}. Use arrow keys to navigate, 'back' to return.")
 
 
 def cmd_episodes(ip: str, query: str):
@@ -934,8 +1004,9 @@ def cmd_episodes(ip: str, query: str):
     key(ip, "ok")
     wait(2)
     screenshot(ip, f"/tmp/formuler-episodes.png")
-    info(f"Episode browser open for '{query}'. Screenshot saved to /tmp/formuler-episodes.png")
-    print("Navigate with arrow keys. 'back' to return.")
+    output_ok(f"Episode browser open for '{query}'. Screenshot saved to /tmp/formuler-episodes.png")
+    if not JSON_MODE:
+        print("Navigate with arrow keys. 'back' to return.")
 
 
 def cmd_resume(ip: str, content_type: str = "vod"):
@@ -948,11 +1019,7 @@ def cmd_resume(ip: str, content_type: str = "vod"):
         return
 
     last = hist[0]
-    if JSON_MODE:
-        output(last)
-        return
-
-    info(f"Resuming: {last['title']}")
+    output_ok(f"Resuming: {last['title']}", last)
     _notify("Formuler Remote", f"Resuming: {last['title']}")
 
     if content_type == "live" and last.get("intent"):
@@ -1004,8 +1071,9 @@ def cmd_epg(ip: str, channel: str = ""):
         wait(3)
     key(ip, "info")
     wait(1)
-    screenshot(ip, "/tmp/formuler-epg.png")
-    info("EPG info screenshot saved to /tmp/formuler-epg.png")
+    path = "/tmp/formuler-epg.png"
+    screenshot(ip, path)
+    output_ok(f"EPG info screenshot saved to {path}", {"screenshot": path})
     key(ip, "info")  # dismiss
 
 
@@ -1013,8 +1081,9 @@ def cmd_guide(ip: str):
     ensure_mytv(ip)
     key(ip, "guide")
     wait(2)
-    screenshot(ip, "/tmp/formuler-guide.png")
-    info("EPG guide screenshot saved to /tmp/formuler-guide.png")
+    path = "/tmp/formuler-guide.png"
+    screenshot(ip, path)
+    output_ok(f"EPG guide screenshot saved to {path}", {"screenshot": path})
 
 
 def cmd_search_epg(ip: str, query: str):
@@ -1028,7 +1097,7 @@ def cmd_search_epg(ip: str, query: str):
     wait(0.5)
     key(ip, "ok")
     wait(1)
-    info(f"Showing EPG results for '{query}'. Navigate with arrows.")
+    output_ok(f"Showing EPG results for '{query}'. Navigate with arrows.")
 
 
 def cmd_now_playing(ip: str):
@@ -1126,7 +1195,7 @@ def cmd_at(ip: str, time_str: str, command: str):
     t.daemon = True
     t.start()
     _timers.append({"timer": t, "time": target.strftime("%H:%M"), "command": command})
-    info(f"Scheduled '{command}' at {target.strftime('%H:%M')} ({delay / 60:.0f}min from now)")
+    output_ok(f"Scheduled '{command}' at {target.strftime('%H:%M')} ({delay / 60:.0f}min from now)")
 
 
 def cmd_timers():
@@ -1145,9 +1214,9 @@ def cmd_cancel_timer(index: int):
     active = [t for t in _timers if t["timer"].is_alive()]
     if 0 <= index < len(active):
         active[index]["timer"].cancel()
-        info(f"Cancelled: {active[index]['command']}")
+        output_ok(f"Cancelled: {active[index]['command']}")
     else:
-        error(f"Invalid timer index. Use 'timers' to see list.")
+        output_err(f"Invalid timer index. Use 'timers' to see list.")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1160,22 +1229,22 @@ def cmd_repeat(ip: str, key_name: str, count: int, delay_ms: float = 250):
         key(ip, key_name)
         if i < count - 1:
             time.sleep(delay_s)
-    info(f"Pressed {key_name} x{count}")
+    output_ok(f"Pressed {key_name} x{count}")
 
 
 def cmd_cec(ip: str, action: str):
     action = action.lower()
     if action == "on":
         key(ip, "wakeup")
-        info("CEC: Wake up / Power on")
+        output_ok("CEC: Wake up / Power on")
     elif action == "off":
         key(ip, "sleep")
-        info("CEC: Sleep / Power off")
+        output_ok("CEC: Sleep / Power off")
     elif action == "standby":
         key(ip, "power")
-        info("CEC: Standby toggle")
+        output_ok("CEC: Standby toggle")
     else:
-        error(f"Unknown CEC action: {action}. Use: on, off, standby")
+        output_err(f"Unknown CEC action: {action}. Use: on, off, standby")
 
 
 def cmd_record_screen(ip: str, duration: int = 30, path: str = "/tmp/formuler-recording.mp4"):
@@ -1186,9 +1255,88 @@ def cmd_record_screen(ip: str, duration: int = 30, path: str = "/tmp/formuler-re
             timeout=duration + 10)
     except Exception:
         pass
-    adb(ip, "pull", remote, path, timeout=30)
+    code, out = adb(ip, "pull", remote, path, timeout=30)
     adb(ip, "shell", "rm", remote)
-    info(f"Recording saved to {path}")
+    if code != 0:
+        output_err(f"Recording pull failed: {out}")
+    else:
+        output_ok(f"Recording saved to {path}", {"path": path})
+
+
+# ══════════════════════════════════════════════════════════════
+#  CONVENIENCE COMMANDS
+# ══════════════════════════════════════════════════════════════
+
+def cmd_wake(ip: str):
+    key(ip, "wakeup")
+    wait(1)
+    ensure_mytv(ip)
+    output_ok("Device awake, MyTV running")
+
+
+def cmd_power_off(ip: str):
+    key(ip, "sleep")
+    wait(0.5)
+    run_adb("disconnect", tgt(ip))
+    output_ok("CEC sleep sent, disconnected")
+
+
+def cmd_history(count: int = 20):
+    history_file = CACHE_DIR / "history"
+    if not history_file.exists():
+        output_err("No command history found.")
+        return
+    lines = history_file.read_text().splitlines()
+    recent = lines[-count:] if count < len(lines) else lines
+    if JSON_MODE:
+        output(recent)
+    else:
+        for i, line in enumerate(recent, 1):
+            print(f"  {i:3d}  {line}")
+
+
+def cmd_watch(ip: str, interval: float = 5.0, directory: str = "/tmp"):
+    """Take screenshots at regular intervals until Ctrl-C."""
+    info(f"Watching every {interval}s to {directory}/ (Ctrl-C to stop)")
+    try:
+        n = 0
+        while True:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = f"{directory}/formuler-watch-{ts}.png"
+            screenshot(ip, path)
+            n += 1
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        output_ok(f"Watch stopped after {n} screenshots")
+
+
+# ══════════════════════════════════════════════════════════════
+#  M3U EXPORT
+# ══════════════════════════════════════════════════════════════
+
+def cmd_export_m3u(ip: str, path: str = "channels.m3u"):
+    """Export full channel cache as M3U playlist (metadata only)."""
+    channels = get_full_channels(ip)
+    if not channels:
+        output_err("No channels in cache. Run 'refresh-all' first.")
+        return
+
+    lines = ["#EXTM3U"]
+    for ch in channels:
+        num = ch.get("number", "0")
+        title = ch.get("title", "Unknown")
+        logo = ch.get("logo", "")
+        extinf = f'#EXTINF:-1 tvg-chno="{num}"'
+        if logo:
+            extinf += f' tvg-logo="{logo}"'
+        extinf += f",{title}"
+        lines.append(extinf)
+        # No stream URL available — CLI uses intents, not direct streams
+        lines.append(f"# Channel {num}: {title} (no stream URL available)")
+
+    content = "\n".join(lines) + "\n"
+    Path(path).write_text(content, encoding="utf-8")
+    output_ok(f"Exported {len(channels)} channels to {path}", {"path": path, "count": len(channels)})
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1203,10 +1351,24 @@ def go_to_channel_number(ip: str, number: str):
 
 def screenshot(ip: str, path: str = "/tmp/formuler-screenshot.png"):
     remote = "/sdcard/screenshot.png"
-    adb(ip, "shell", "screencap", "-p", remote)
-    run_adb("-s", tgt(ip), "pull", remote, path)
+    code, out = adb(ip, "shell", "screencap", "-p", remote)
+    if code != 0:
+        output_err(f"Screenshot capture failed: {out}")
+        return
+    code, out = run_adb("-s", tgt(ip), "pull", remote, path)
+    if code != 0:
+        output_err(f"Screenshot pull failed: {out}")
+        return
     adb(ip, "shell", "rm", remote)
-    info(f"Screenshot saved to {path}")
+    output_ok(f"Screenshot saved to {path}", {"path": path})
+
+
+def cmd_ping(ip: str):
+    code, out = adb(ip, "shell", "echo", "pong", timeout=5)
+    if code == 0 and "pong" in out:
+        output_ok("Device reachable", {"ip": ip, "port": ADB_PORT})
+    else:
+        output_err(f"Device unreachable: {out}")
 
 
 def cmd_status(ip: str):
@@ -1301,12 +1463,22 @@ HELP_TEXT = f"""
     cec <on|off|standby>            TV power via CEC
     record [duration] [path]        screen record (default 30s)
 
+  {_C.CYAN}EXPORT{_C.RESET}
+    export-m3u [path]               export channel lineup as M3U file
+
+  {_C.CYAN}CONVENIENCE{_C.RESET}
+    wake                            CEC wakeup + launch MyTVOnline
+    power-off                       CEC sleep + disconnect
+    history [count]                 show recent command history
+    watch [interval] [dir]          screenshot every N seconds (Ctrl-C to stop)
+
   {_C.CYAN}GENERAL{_C.RESET}
     type <text>                     type text on device
     open <app>                      launch app (youtube/netflix/prime/mytv/...)
     apps                            list installed apps
     screenshot [path]               capture screen
     status                          show device info
+    ping                            check device connectivity
     reboot                          reboot device
     refresh                         reload favorites/history cache
     refresh-all                     rebuild full channel database
@@ -1319,6 +1491,10 @@ HELP_TEXT = f"""
     --json                          structured JSON output
     --yes                           skip confirmation prompts
     --first                         auto-select first match
+    --wait <N>                      sleep N seconds after command
+    --timeout <N>                   override ADB timeout (default 10s)
+    --verbose / --debug             print ADB commands to stderr
+    -h / --help                     show usage and exit
 """
 
 
@@ -1465,6 +1641,26 @@ def dispatch(ip: str, raw: str) -> bool:
     elif cmd == "apps":
         list_apps(ip)
 
+    # Export
+    elif cmd == "export-m3u":
+        cmd_export_m3u(ip, args[0] if args else "channels.m3u")
+
+    # Convenience
+    elif cmd == "wake":
+        cmd_wake(ip)
+    elif cmd == "power-off":
+        cmd_power_off(ip)
+    elif cmd == "history":
+        cmd_history(int(args[0]) if args and args[0].isdigit() else 20)
+    elif cmd == "watch":
+        interval = float(args[0]) if args and args[0].replace(".", "").isdigit() else 5.0
+        directory = args[1] if len(args) > 1 else "/tmp"
+        cmd_watch(ip, interval, directory)
+
+    # Connectivity
+    elif cmd == "ping":
+        cmd_ping(ip)
+
     # Misc
     elif cmd == "screenshot":
         screenshot(ip, args[0] if args else "/tmp/formuler-screenshot.png")
@@ -1478,7 +1674,7 @@ def dispatch(ip: str, raw: str) -> bool:
             try:
                 if input("Reboot device? [y/N] ").strip().lower() == "y":
                     adb(ip, "shell", "reboot")
-                    info("Rebooting...")
+                    output_ok("Rebooting...")
             except (EOFError, KeyboardInterrupt):
                 pass
 
@@ -1512,7 +1708,9 @@ def _make_completer(ip: str):
         "macro", "macros", "at", "timers", "cancel-timer",
         "repeat", "cec", "record",
         "type", "key", "open", "apps",
-        "screenshot", "status", "reboot", "refresh", "refresh-all",
+        "export-m3u",
+        "wake", "power-off", "history", "watch",
+        "screenshot", "status", "ping", "reboot", "refresh", "refresh-all",
         "keys", "help", "quit", "exit",
     ]
     commands += list(KEYS.keys())
@@ -1610,26 +1808,86 @@ def interactive(ip: str):
 
 
 # ══════════════════════════════════════════════════════════════
+#  SHELL COMPLETIONS
+# ══════════════════════════════════════════════════════════════
+
+def _generate_completions(shell: str):
+    all_words = sorted(set(list(COMMANDS.keys()) + list(KEYS.keys())))
+    words_str = " ".join(all_words)
+    if shell == "bash":
+        print(f"""_formuler_remote_completions() {{
+  local cur="${{COMP_WORDS[COMP_CWORD]}}"
+  COMPREPLY=($(compgen -W "{words_str}" -- "$cur"))
+}}
+complete -F _formuler_remote_completions formuler-remote
+complete -F _formuler_remote_completions formuler-remote.py""")
+    elif shell == "zsh":
+        print(f"""#compdef formuler-remote formuler-remote.py
+_formuler_remote() {{
+  local -a commands=({words_str})
+  _describe 'command' commands
+}}
+compdef _formuler_remote formuler-remote formuler-remote.py""")
+    elif shell == "fish":
+        for w in all_words:
+            desc = COMMANDS.get(w, {}).get("desc", "key")
+            print(f"complete -c formuler-remote -f -a '{w}' -d '{desc}'")
+    else:
+        print(f"Unknown shell: {shell}. Use: bash, zsh, fish", file=sys.stderr)
+        sys.exit(1)
+
+
+# ══════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════
 
 def main():
-    global JSON_MODE, AUTO_YES, AUTO_FIRST
+    global JSON_MODE, AUTO_YES, AUTO_FIRST, VERBOSE, ADB_TIMEOUT
 
     if not shutil.which("adb"):
         print("Error: adb not found. Install with: sudo pacman -S android-tools")
         sys.exit(1)
 
-    # Parse flags
-    flags = {"--json", "--yes", "--first"}
-    argv = [a for a in sys.argv[1:] if a not in flags]
-    raw_args = set(sys.argv[1:])
-    if "--json" in raw_args:
-        JSON_MODE = True
-    if "--yes" in raw_args:
-        AUTO_YES = True
-    if "--first" in raw_args:
-        AUTO_FIRST = True
+    # Parse flags (including value-bearing ones)
+    simple_flags = {"--json", "--yes", "--first", "--verbose", "--debug"}
+    argv = []
+    post_wait = 0.0
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
+        if arg in simple_flags:
+            if arg == "--json":
+                JSON_MODE = True
+            elif arg == "--yes":
+                AUTO_YES = True
+            elif arg == "--first":
+                AUTO_FIRST = True
+            elif arg in ("--verbose", "--debug"):
+                VERBOSE = True
+        elif arg == "--wait" and i + 1 < len(sys.argv):
+            i += 1
+            try:
+                post_wait = float(sys.argv[i])
+            except ValueError:
+                print("Error: --wait requires a numeric argument", file=sys.stderr)
+                sys.exit(1)
+        elif arg == "--timeout" and i + 1 < len(sys.argv):
+            i += 1
+            try:
+                ADB_TIMEOUT = int(sys.argv[i])
+            except ValueError:
+                print("Error: --timeout requires an integer argument", file=sys.stderr)
+                sys.exit(1)
+        elif arg in ("--help", "-h"):
+            print(__doc__)
+            sys.exit(0)
+        elif arg == "--completions" and i + 1 < len(sys.argv):
+            i += 1
+            _generate_completions(sys.argv[i])
+            sys.exit(0)
+        else:
+            argv.append(arg)
+        i += 1
 
     ip = DEFAULT_IP
     off = 0
@@ -1648,16 +1906,43 @@ def main():
             print(f"Config: {CONFIG_FILE}")
         sys.exit(1)
 
+    # Acquire lock to prevent concurrent instances
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _lock_file = open(CACHE_DIR / ".lock", "w")
+    try:
+        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        msg = "Another formuler-remote instance is running"
+        if JSON_MODE:
+            _json_out({"ok": False, "error": msg})
+        else:
+            print(f"Error: {msg}")
+        sys.exit(1)
+
     if not connect(ip, quiet=JSON_MODE):
         sys.exit(1)
 
     remaining = argv[off:]
     if not remaining:
-        interactive(ip)
-        return
+        # Batch/pipe mode: read commands from stdin when not a TTY
+        if not sys.stdin.isatty():
+            for line in sys.stdin:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                dispatch(ip, line)
+                if post_wait > 0:
+                    time.sleep(post_wait)
+            run_adb("disconnect", tgt(ip))
+            sys.exit(_exit_code)
+        else:
+            interactive(ip)
+            return
 
     cmd_str = " ".join(remaining)
     dispatch(ip, cmd_str)
+    if post_wait > 0:
+        time.sleep(post_wait)
     run_adb("disconnect", tgt(ip))
     sys.exit(_exit_code)
 
