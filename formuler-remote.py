@@ -3,7 +3,13 @@
 Formuler IPTV Remote Control via ADB
 
 Usage:
-  ./formuler-remote.py [--json] [device_ip] [command] [args...]
+  ./formuler-remote.py [--json] [device_ip_or_hostname] [command] [args...]
+
+Device IP resolution (first match wins):
+  1. CLI argument:        ./formuler-remote.py 192.168.0.100 tune TF1
+  2. Environment variable: FORMULER_IP=192.168.0.100
+  3. .env file:           FORMULER_IP=192.168.0.100  (in ./ or ~/.config/formuler-remote/)
+  4. Config file:         [device] ip = "192.168.0.100"
 
 Examples:
   ./formuler-remote.py                                  # interactive mode
@@ -64,6 +70,21 @@ CONFIG_FILE = CONFIG_DIR / "config.toml"
 CONFIG_JSON = CONFIG_DIR / "config.json"
 
 
+def _load_env(path: Path) -> dict[str, str]:
+    """Load KEY=VALUE pairs from a .env file."""
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            env[k.strip()] = v.strip().strip("'\"")
+    return env
+
+
 def _load_config() -> dict:
     if CONFIG_FILE.exists():
         try:
@@ -81,12 +102,21 @@ def _load_config() -> dict:
     return {}
 
 
+# Load .env from project dir or config dir
+_dotenv = _load_env(Path(".env"))
+_dotenv.update(_load_env(CONFIG_DIR / ".env"))
+
 CONFIG = _load_config()
 
 # ──────────────────────── Constants ────────────────────────
 
 ADB_PORT = CONFIG.get("device", {}).get("port", 5555)
-DEFAULT_IP = CONFIG.get("device", {}).get("ip", "192.168.0.100")
+# IP resolution order: FORMULER_IP env var > .env file > config file
+DEFAULT_IP = (
+    os.environ.get("FORMULER_IP")
+    or _dotenv.get("FORMULER_IP")
+    or CONFIG.get("device", {}).get("ip", "")
+)
 MOL3_PKG = "tv.formuler.mol3.real"
 CACHE_DIR = Path.home() / ".cache" / "formuler-remote"
 CHANNELS_CACHE = CACHE_DIR / "channels.json"
@@ -1455,9 +1485,16 @@ def main():
 
     ip = DEFAULT_IP
     off = 0
-    if argv and re.match(r"\d+\.\d+\.\d+\.\d+", argv[0]):
+    # Accept IP address or hostname as first positional arg
+    if argv and re.match(r"^[\w.\-]+$", argv[0]) and not argv[0] in KEYS and "." in argv[0]:
         ip = argv[0]
         off = 1
+
+    if not ip:
+        print("Error: No device IP/hostname specified.")
+        print("Provide it via: CLI argument, FORMULER_IP env var, .env file, or config file.")
+        print(f"Config: {CONFIG_FILE}")
+        sys.exit(1)
 
     if not connect(ip, quiet=JSON_MODE):
         sys.exit(1)

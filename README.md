@@ -39,26 +39,39 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 3. **Enable ADB on your Formuler**: Settings > System > Developer Options > ADB Debugging > ON
 4. **Note your device IP**: Settings > Network
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/install.sh | bash
+```
+
+This will check for Python 3.10+ and ADB (offering to install it), download the script to `~/.local/bin/`, and create a `formuler-remote` symlink.
+
+Or install manually:
+
+```bash
+git clone https://github.com/dsebastien/iptv-formuler-cli.git
+cd iptv-formuler-cli
+chmod +x formuler-remote.py
+cp formuler-remote.py ~/.local/bin/
+```
+
 ## Quick Start
 
 ```bash
-# Clone
-git clone https://github.com/dsebastien/iptv-formuler-cli.git
-cd iptv-formuler-cli
+# Set your device IP (or use .env file / config file)
+export FORMULER_IP=<your-device-ip>
 
-# Make executable
-chmod +x formuler-remote.py
+# Interactive mode
+formuler-remote
 
-# Interactive mode (connects to default IP or config IP)
-./formuler-remote.py
-
-# Or specify your device IP
-./formuler-remote.py 192.168.0.100
+# Or pass the IP directly
+formuler-remote <your-device-ip>
 
 # One-shot commands
-./formuler-remote.py tune TF1
-./formuler-remote.py play-movie "batman"
-./formuler-remote.py play-series "breaking bad" 2 3   # S02E03
+formuler-remote tune TF1
+formuler-remote play-movie "batman"
+formuler-remote play-series "breaking bad" 2 3   # S02E03
 ```
 
 ## Usage
@@ -150,6 +163,20 @@ Features tab completion, command history (persisted across sessions), and colore
 | | `refresh-all` | Rebuild full channel database |
 
 ## Configuration
+
+### Device IP / Hostname
+
+The device address is resolved in this order (first match wins):
+
+1. **CLI argument**: `./formuler-remote.py 192.168.0.100 tune TF1`
+2. **Environment variable**: `FORMULER_IP=192.168.0.100 ./formuler-remote.py tune TF1`
+3. **`.env` file** (in current directory or `~/.config/formuler-remote/.env`):
+   ```
+   FORMULER_IP=192.168.0.100
+   ```
+4. **Config file** (see below)
+
+### Config file
 
 Create `~/.config/formuler-remote/config.toml` (Python 3.11+) or `config.json`:
 
