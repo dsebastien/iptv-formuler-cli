@@ -170,3 +170,95 @@ pref_settings_player_trailer_player      # Trailer player
 5. **Resume support** — EXTRA_ASK_RESUME_PLAYBACK intent extra available
 6. **Quality selection** — EXTRA_SELECTED_STREAM_QUALITY intent extra available
 7. **Direct URI playback** — EXTRA_SELECTED_URI_STRING can play arbitrary URLs
+
+## Service Package (tv.formuler.service.real)
+
+### IFormulerService AIDL Interface (complete)
+
+**Media Control:**
+```
+play, pause, stop, seekTo, fastForward, rewind
+next, previous
+playFromMediaId, playFromSearch, playFromUri
+prepare, prepareFromMediaId, prepareFromSearch, prepareFromUri
+getPlaybackState
+adjustVolume, setVolumeTo
+send, sendCommand, sendCustomAction, sendMediaButton
+```
+
+**Power Management:**
+```
+appPowerControl, setPowerMode, getPowerMode
+getPrePowerState, setPrePowerState
+softwareReset
+```
+
+**System:**
+```
+factoryReset
+appSetProperty, appSystemFunc, appSysReadFile
+appCpuRepair
+appGetBootReason, getBootReasonWakeupSrc
+changePincode, checkPincode, getMasterPincode, setMasterPincode
+changeState, getAppState
+getRecStatus, setRecStatus
+isChanghongFactory, appSysIsFactoryMode, appSysSetFactoryFlag
+```
+
+### Broadcast Receivers
+```
+MolReceiver:
+  - fserver_restart        → Restart streaming server connection
+  - ACTION_ALARM_GOTO_LIVE → Switch to live TV
+  - ACTION_ALARM_FIRE      → Fire alarm
+
+AlarmReceiver:
+  - tv.formuler.mol3.alarm.ACTION_ALARM_WAKEUP
+  - tv.formuler.mol3.alarm.watchlist.ACTION_WATCHLIST_ON_TIME
+
+SportsAlarmReceiver:
+  - tv.formuler.mol3.sports.ACTION_ALARM
+
+PreviewChannelReceiver:
+  - android.media.tv.action.PREVIEW_PROGRAM_BROWSABLE_DISABLED
+  - android.media.tv.action.INITIALIZE_PROGRAMS  → Force refresh preview channels
+```
+
+### Launchable Activities (Service Package)
+```
+AutoShutdownActivity — Power-off countdown dialog (has intent filter)
+  - Can be used for sleep timer functionality
+DialogActivity — System dialog (DIALOG_TYPE_REC_POWER_CONFIRM for recording+power)
+StkMessageActivity — Display STK portal messages
+SystemMessageActivity — Authentication/system messages
+```
+
+### ExternalMessageService
+- Handles STK portal notifications from IPTV server
+- Requires permission: `tv.formuler.service.permssion.EXTERNAL_MESSAGE`
+- Message types: MSG_TYPE1_GENERATED, MSG_TYPE2_RECEVIED, MSG_TYPE3_GENERATED
+
+### TVService Bindings
+```
+tv.formuler.service.START_TV_SERVICE    → Start the TV service
+tv.formuler.service.BIND_TV_SERVICE     → Bind to TV service
+tv.formuler.service.BIND_TV_SERVICE_MOL → Bind from MOL3 app
+```
+
+## Network
+- Management: molm.aloys.co.kr, sports.aloys.co.kr (Akamai CDN)
+- Firebase/GMS connections when idle
+- Streaming connections only active during playback
+
+## ActionCard Detail Page Buttons
+The VOD/series detail overlay can show these action buttons:
+```
+Watch (DefaultWatch, ExternalWatch)              → Play from start
+Continue (WatchContinue, EpisodeContinue,         → Resume from last position
+          QualityContinue, QualityEpisodeContinue)
+Restart (WatchRestart, EpisodeRestart,            → Restart from beginning
+         QualityRestart, QualityEpisodeRestart)
+AllEpisodes (Default, External)                   → Episode browser
+ChooseQuality (Default, External)                 → Quality picker
+Favorite                                          → Toggle favorite
+```
