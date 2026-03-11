@@ -7,7 +7,9 @@ set -euo pipefail
 REPO="dsebastien/iptv-formuler-cli"
 SCRIPT_NAME="formuler-remote.py"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main/${SCRIPT_NAME}"
+SKILL_URL="https://raw.githubusercontent.com/${REPO}/main/.claude/skills/formuler-remote/SKILL.md"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+SKILL_DIR="${HOME}/.claude/skills/formuler-remote"
 MIN_PYTHON="3.10"
 
 # ── helpers ──────────────────────────────────────────────
@@ -161,6 +163,29 @@ install_script() {
     info "Symlink: ${INSTALL_DIR}/formuler-remote"
 }
 
+# ── Claude Code skill ────────────────────────────────────
+
+install_skill() {
+    mkdir -p "$SKILL_DIR"
+
+    local tmp
+    tmp=$(mktemp)
+
+    info "Installing Claude Code skill..."
+    if command_exists curl; then
+        curl -fsSL "$SKILL_URL" -o "$tmp"
+    elif command_exists wget; then
+        wget -qO "$tmp" "$SKILL_URL"
+    else
+        warn "Cannot download skill (no curl/wget). Skipping."
+        rm -f "$tmp"
+        return
+    fi
+
+    mv "$tmp" "${SKILL_DIR}/SKILL.md"
+    info "Skill installed to ${SKILL_DIR}/SKILL.md"
+}
+
 # ── PATH check ───────────────────────────────────────────
 
 check_path() {
@@ -212,6 +237,7 @@ main() {
     check_python
     check_adb "$os" "$pkg"
     install_script
+    install_skill
     check_path
 
     echo ""
@@ -225,6 +251,9 @@ main() {
     echo ""
     echo "  # Or run a command directly"
     echo "  formuler-remote tune TF1"
+    echo ""
+    echo "  # Claude Code skill installed — Claude can now control your TV!"
+    echo "  # Try asking: 'tune to TF1' or 'play the movie batman'"
     echo ""
 }
 

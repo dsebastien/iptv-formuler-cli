@@ -17,6 +17,8 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 - **Timed actions** — schedule commands at specific times
 - **Interactive REPL** — tab completion, command history, colored output
 - **JSON output** — `--json` flag for scripting and integration
+- **Agent-friendly** — structured JSON envelope, `--first`/`--yes` flags, exit codes, command schema
+- **Claude Code skill** — included skill for AI-driven TV control
 - **Auto-reconnect** — handles dropped ADB connections transparently
 - **CEC control** — power TV on/off through the Formuler box
 - **Screen capture** — screenshots and screen recording
@@ -45,7 +47,10 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/install.sh | bash
 ```
 
-This will check for Python 3.10+ and ADB (offering to install it), download the script to `~/.local/bin/`, and create a `formuler-remote` symlink.
+This will:
+- Check for Python 3.10+ and ADB (offering to install ADB if missing)
+- Download the script to `~/.local/bin/` with a `formuler-remote` symlink
+- Install the Claude Code skill to `~/.claude/skills/formuler-remote/`
 
 Or install manually:
 
@@ -54,6 +59,9 @@ git clone https://github.com/dsebastien/iptv-formuler-cli.git
 cd iptv-formuler-cli
 chmod +x formuler-remote.py
 cp formuler-remote.py ~/.local/bin/
+# Optional: install Claude Code skill
+mkdir -p ~/.claude/skills/formuler-remote
+cp .claude/skills/formuler-remote/SKILL.md ~/.claude/skills/formuler-remote/
 ```
 
 ## Quick Start
@@ -80,39 +88,43 @@ formuler-remote play-series "breaking bad" 2 3   # S02E03
 
 ```bash
 # Live TV
-./formuler-remote.py tune "BFM TV"         # tune by name
-./formuler-remote.py tune 42               # tune by channel number (requires refresh-all)
-./formuler-remote.py search france          # search channels
+formuler-remote tune "BFM TV"             # tune by name
+formuler-remote tune 42                   # tune by channel number (requires refresh-all)
+formuler-remote search france             # search channels
 
 # VOD
-./formuler-remote.py play-movie batman     # search & play first match
-./formuler-remote.py search-vod batman     # search movies on device
+formuler-remote play-movie batman         # search & play first match
+formuler-remote search-vod batman         # search movies on device
 
 # Series
-./formuler-remote.py play-series "breaking bad" 1 4   # play S01E04
-./formuler-remote.py search-series "walking dead"
+formuler-remote play-series "breaking bad" 1 4   # play S01E04
+formuler-remote search-series "walking dead"
 
 # Favorites
-./formuler-remote.py star                  # toggle star on current page
-./formuler-remote.py star-vod batman       # find & star a movie
+formuler-remote star                      # toggle star on current page
+formuler-remote star-vod batman           # find & star a movie
 
 # Navigation
-./formuler-remote.py section vod           # switch to VOD section
-./formuler-remote.py up                    # send key press
-./formuler-remote.py ok                    # send OK/Enter
-
-# JSON output for scripting
-./formuler-remote.py --json search TF1
-./formuler-remote.py --json categories
+formuler-remote section vod               # switch to VOD section
+formuler-remote up                        # send key press
+formuler-remote ok                        # send OK/Enter
 ```
 
 ### Interactive Mode
 
 ```bash
-./formuler-remote.py
+formuler-remote
 ```
 
 Features tab completion, command history (persisted across sessions), and colored output. Type `help` for the full command reference.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Structured JSON output (`{"ok": bool, "data"\|"error": ...}`) |
+| `--first` | Auto-select first match instead of prompting |
+| `--yes` | Skip confirmation prompts (e.g., reboot) |
 
 ### Command Reference
 
@@ -161,6 +173,67 @@ Features tab completion, command history (persisted across sessions), and colore
 | | `reboot` | Reboot device |
 | | `refresh` | Reload favorites/history cache |
 | | `refresh-all` | Rebuild full channel database |
+| | `commands` | List all commands as JSON schema |
+
+Get the full command schema programmatically:
+```bash
+formuler-remote --json commands
+```
+
+## AI Agent Integration
+
+The CLI is designed to be efficient for AI agents (Claude Code, scripts, automation):
+
+### Flags for automation
+
+Always use `--json --first` for non-interactive operation:
+
+```bash
+# Structured JSON output with auto-selection
+formuler-remote --json --first tune "BFM TV"
+
+# Skip confirmations
+formuler-remote --json --yes reboot
+
+# Discover all commands programmatically
+formuler-remote --json commands
+```
+
+### JSON output format
+
+All commands with `--json` return a consistent envelope:
+
+```json
+{"ok": true, "data": {"title": "BFM TV", ...}, "message": "Tuning to: BFM TV"}
+```
+
+On error:
+```json
+{"ok": false, "error": "No channel matching 'xyz'"}
+```
+
+### Exit codes
+
+- `0` — success
+- `1` — error (command failed, device not found, etc.)
+
+### Claude Code skill
+
+The installer automatically installs a Claude Code skill to `~/.claude/skills/formuler-remote/`. This lets Claude control your TV naturally:
+
+> "Tune to TF1"
+> "Play the movie Batman"
+> "What's the device status?"
+> "Play Breaking Bad season 2 episode 5"
+
+The skill teaches Claude to always use `--json --first --yes` flags, parse the JSON envelope, and check exit codes.
+
+To install the skill manually:
+```bash
+mkdir -p ~/.claude/skills/formuler-remote
+curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/.claude/skills/formuler-remote/SKILL.md \
+  -o ~/.claude/skills/formuler-remote/SKILL.md
+```
 
 ## Configuration
 
@@ -168,8 +241,8 @@ Features tab completion, command history (persisted across sessions), and colore
 
 The device address is resolved in this order (first match wins):
 
-1. **CLI argument**: `./formuler-remote.py 192.168.0.100 tune TF1`
-2. **Environment variable**: `FORMULER_IP=192.168.0.100 ./formuler-remote.py tune TF1`
+1. **CLI argument**: `formuler-remote 192.168.0.100 tune TF1`
+2. **Environment variable**: `FORMULER_IP=192.168.0.100 formuler-remote tune TF1`
 3. **`.env` file** (in current directory or `~/.config/formuler-remote/.env`):
    ```
    FORMULER_IP=192.168.0.100
@@ -210,7 +283,7 @@ JSON equivalent (`config.json`):
 
 - **Transport**: ADB (Android Debug Bridge) over TCP/IP — no USB cable needed
 - **Live TV**: Deep link intents to the MyTVOnline app for instant channel switching
-- **VOD/Series**: UI automation via ADB key events (search → select → play)
+- **VOD/Series**: UI automation via ADB key events (search -> select -> play)
 - **Channel data**: Content providers (`formuler.media.tv` for favorites/history, `searchProvider` for full channel list)
 - **No root required**: Standard ADB debugging is sufficient
 - **No credentials**: Channel tuning uses device intents, not IPTV credentials

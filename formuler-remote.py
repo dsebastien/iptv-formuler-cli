@@ -3,7 +3,12 @@
 Formuler IPTV Remote Control via ADB
 
 Usage:
-  ./formuler-remote.py [--json] [device_ip_or_hostname] [command] [args...]
+  ./formuler-remote.py [flags] [device_ip_or_hostname] [command] [args...]
+
+Flags:
+  --json     Output structured JSON ({"ok": bool, "data"|"error": ...})
+  --yes      Skip confirmation prompts (for automation)
+  --first    Auto-select first match instead of prompting
 
 Device IP resolution (first match wins):
   1. CLI argument:        ./formuler-remote.py 192.168.0.100 tune TF1
@@ -23,6 +28,9 @@ Examples:
   ./formuler-remote.py section vod                       # switch to VOD section
   ./formuler-remote.py stop-vod                          # stop with confirmation
   ./formuler-remote.py --json categories                 # JSON output for scripting
+  ./formuler-remote.py --json --first tune TF1           # agent-friendly: JSON + auto-select
+  ./formuler-remote.py --json commands                   # list all commands as JSON schema
+  ./formuler-remote.py --yes reboot                      # skip confirmation prompts
   ./formuler-remote.py macro morning                     # run a saved macro
 
 Prerequisites:
@@ -123,6 +131,8 @@ CHANNELS_CACHE = CACHE_DIR / "channels.json"
 FULL_CHANNELS_CACHE = CACHE_DIR / "full_channels.json"
 
 JSON_MODE = False
+AUTO_YES = False
+AUTO_FIRST = False
 
 KEYS = {
     "power": 26, "home": 3, "back": 4, "menu": 82,
@@ -168,15 +178,120 @@ SEARCH_PREFIXES = (
     + ["|BE|", "|FR|", "|NL|", "|UK|", "|US|", "|DE|", "|ES|", "|IT|", "|PT|"]
 )
 
+# ──────────────────────── Command Registry ────────────────────────
+# Machine-readable command schema for AI agents and scripting
+
+COMMANDS = {
+    # Navigation
+    "up": {"args": "", "desc": "Navigate up"},
+    "down": {"args": "", "desc": "Navigate down"},
+    "left": {"args": "", "desc": "Navigate left"},
+    "right": {"args": "", "desc": "Navigate right"},
+    "ok": {"args": "", "desc": "Confirm / Enter"},
+    "back": {"args": "", "desc": "Go back"},
+    "home": {"args": "", "desc": "Go to home screen"},
+    "menu": {"args": "", "desc": "Open menu"},
+    # Playback
+    "play": {"args": "", "desc": "Start playback"},
+    "pause": {"args": "", "desc": "Pause playback"},
+    "play-pause": {"args": "", "desc": "Toggle play/pause"},
+    "stop": {"args": "", "desc": "Stop playback"},
+    "rewind": {"args": "", "desc": "Rewind"},
+    "fast-forward": {"args": "", "desc": "Fast forward"},
+    # Volume
+    "volume-up": {"args": "", "desc": "Volume up"},
+    "volume-down": {"args": "", "desc": "Volume down"},
+    "mute": {"args": "", "desc": "Toggle mute"},
+    # Channels
+    "channel-up": {"args": "", "desc": "Next channel"},
+    "channel-down": {"args": "", "desc": "Previous channel"},
+    "channel": {"args": "<number>", "desc": "Go to channel number using digit keys"},
+    # Sections
+    "section": {"args": "<name>", "desc": "Switch section (live/vod/series/radio/recordings/settings)"},
+    "browse": {"args": "<section>", "desc": "Open section for manual browsing"},
+    # Live TV
+    "tune": {"args": "<name|number>", "desc": "Tune channel by name or number. Auto-selects first match with --first"},
+    "search": {"args": "<query>", "desc": "Search channels in local DB and device provider"},
+    "list": {"args": "[filter]", "desc": "List channels from favorites/history cache"},
+    "list-all": {"args": "[filter]", "desc": "List all enumerated channels (requires refresh-all first)"},
+    "channel-info": {"args": "<number>", "desc": "Show details for a channel number"},
+    "categories": {"args": "", "desc": "Show content category counts"},
+    "refresh": {"args": "", "desc": "Reload favorites/history cache from device"},
+    "refresh-all": {"args": "", "desc": "Rebuild full channel database (slow, scans A-Z)"},
+    # VOD
+    "search-vod": {"args": "<query>", "desc": "Search movies on device UI"},
+    "play-movie": {"args": "<query>", "desc": "Search and play first matching movie"},
+    "stop-vod": {"args": "", "desc": "Stop VOD playback with confirmation dialog"},
+    # Series
+    "search-series": {"args": "<query>", "desc": "Search series on device UI"},
+    "play-series": {"args": "<query> [season] [episode]", "desc": "Play series episode (default S1E1)"},
+    "episodes": {"args": "<query>", "desc": "Open episode browser and take screenshot"},
+    # Browsing
+    "resume": {"args": "[vod|series|live]", "desc": "Resume last watched content from history"},
+    "info": {"args": "<query>", "desc": "Show content details from local database"},
+    # EPG
+    "epg": {"args": "[channel]", "desc": "Show EPG info overlay and take screenshot"},
+    "guide": {"args": "", "desc": "Open full EPG guide and take screenshot"},
+    "search-epg": {"args": "<query>", "desc": "Search EPG program listings"},
+    "now-playing": {"args": "", "desc": "Capture player log entries from logcat"},
+    # Favorites
+    "star": {"args": "", "desc": "Toggle star/favorite on current detail page"},
+    "star-vod": {"args": "<query>", "desc": "Find movie and toggle star"},
+    "star-series": {"args": "<query>", "desc": "Find series and toggle star"},
+    # Macros & Timers
+    "macro": {"args": "<name>", "desc": "Run a saved macro from config"},
+    "macros": {"args": "", "desc": "List available macros"},
+    "at": {"args": "<HH:MM> <command>", "desc": "Schedule a command at a specific time"},
+    "timers": {"args": "", "desc": "List pending scheduled timers"},
+    "cancel-timer": {"args": "<index>", "desc": "Cancel a pending timer by index"},
+    # Advanced
+    "repeat": {"args": "<key> <count>", "desc": "Press a key N times"},
+    "cec": {"args": "<on|off|standby>", "desc": "TV power control via CEC pass-through"},
+    "record": {"args": "[duration] [path]", "desc": "Screen record (default 30s)"},
+    # General
+    "type": {"args": "<text>", "desc": "Type text on device keyboard"},
+    "key": {"args": "<keyname>", "desc": "Send a single key event"},
+    "open": {"args": "<app>", "desc": "Launch app (youtube/netflix/prime/mytv/plex/kodi/vlc/disney/settings)"},
+    "apps": {"args": "", "desc": "List installed third-party apps"},
+    "screenshot": {"args": "[path]", "desc": "Capture screen to file (default /tmp/formuler-screenshot.png)"},
+    "status": {"args": "", "desc": "Show device info (model, Android version, uptime, foreground app)"},
+    "reboot": {"args": "", "desc": "Reboot device (requires --yes to skip confirmation)"},
+    "commands": {"args": "", "desc": "List all commands with args and descriptions (JSON schema)"},
+    "keys": {"args": "", "desc": "List all remote key names"},
+    "help": {"args": "", "desc": "Show help text"},
+}
+
 
 # ──────────────────────── Output Helpers ────────────────────────
+
+_exit_code = 0
+
+
+def _json_out(data: dict):
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def output(data, human_text: str = ""):
     if JSON_MODE:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        _json_out({"ok": True, "data": data})
     else:
         print(human_text or str(data))
+
+
+def output_ok(msg: str = "", data=None):
+    if JSON_MODE:
+        _json_out({"ok": True, "message": msg, **({"data": data} if data is not None else {})})
+    elif msg:
+        print(f"{_C.GREEN}{msg}{_C.RESET}")
+
+
+def output_err(msg: str, data=None):
+    global _exit_code
+    _exit_code = 1
+    if JSON_MODE:
+        _json_out({"ok": False, "error": msg, **({"data": data} if data is not None else {})})
+    else:
+        print(f"{_C.RED}{msg}{_C.RESET}")
 
 
 def info(msg: str):
@@ -190,10 +305,12 @@ def warn(msg: str):
 
 
 def error(msg: str):
+    global _exit_code
+    _exit_code = 1
     if not JSON_MODE:
         print(f"{_C.RED}{msg}{_C.RESET}")
     else:
-        print(json.dumps({"error": msg}), file=sys.stderr)
+        _json_out({"ok": False, "error": msg})
 
 
 def _notify(title: str, body: str = ""):
@@ -676,9 +793,19 @@ def cmd_tune(ip: str, query: str):
 
 
 def _show_tune_choices(ip: str, matches: list[dict], is_full: bool):
-    if JSON_MODE:
-        output(matches[:15])
+    if AUTO_FIRST or JSON_MODE:
+        ch = matches[0]
+        if JSON_MODE:
+            output_ok(f"Tuning to: {ch['title']}", ch)
+        else:
+            info(f"Tuning to: {ch['title']}")
+        _notify("Formuler Remote", f"Tuning: {ch['title']}")
+        if is_full and ch.get("unique_id"):
+            _tune_by_uid(ip, ch["unique_id"])
+        elif ch.get("intent"):
+            tune_by_intent(ip, ch["intent"])
         return
+
     print(f"Found {len(matches)} matches:")
     for i, ch in enumerate(matches[:15]):
         marker = f"{_C.BOLD}>> " if i == 0 else "   "
@@ -1183,9 +1310,15 @@ HELP_TEXT = f"""
     reboot                          reboot device
     refresh                         reload favorites/history cache
     refresh-all                     rebuild full channel database
+    commands                        list all commands as JSON schema
     keys                            list all key names
     help                            show this help
     quit / exit                     disconnect
+
+  {_C.CYAN}FLAGS{_C.RESET}
+    --json                          structured JSON output
+    --yes                           skip confirmation prompts
+    --first                         auto-select first match
 """
 
 
@@ -1217,9 +1350,14 @@ def dispatch(ip: str, raw: str) -> bool:
     if cmd in ("quit", "exit", "q"):
         return False
 
-    # Help
+    # Help / meta
     elif cmd == "help":
-        print(HELP_TEXT)
+        if JSON_MODE:
+            output(COMMANDS)
+        else:
+            print(HELP_TEXT)
+    elif cmd == "commands":
+        output(COMMANDS)
     elif cmd == "keys":
         if JSON_MODE:
             output(sorted(KEYS.keys()))
@@ -1333,12 +1471,16 @@ def dispatch(ip: str, raw: str) -> bool:
     elif cmd == "status":
         cmd_status(ip)
     elif cmd == "reboot":
-        try:
-            if input("Reboot device? [y/N] ").strip().lower() == "y":
-                adb(ip, "shell", "reboot")
-                info("Rebooting...")
-        except (EOFError, KeyboardInterrupt):
-            pass
+        if AUTO_YES:
+            adb(ip, "shell", "reboot")
+            output_ok("Rebooting...")
+        else:
+            try:
+                if input("Reboot device? [y/N] ").strip().lower() == "y":
+                    adb(ip, "shell", "reboot")
+                    info("Rebooting...")
+            except (EOFError, KeyboardInterrupt):
+                pass
 
     # Direct key (any known key name)
     elif cmd in KEYS:
@@ -1472,16 +1614,22 @@ def interactive(ip: str):
 # ══════════════════════════════════════════════════════════════
 
 def main():
-    global JSON_MODE
+    global JSON_MODE, AUTO_YES, AUTO_FIRST
 
     if not shutil.which("adb"):
         print("Error: adb not found. Install with: sudo pacman -S android-tools")
         sys.exit(1)
 
-    # Parse --json flag
-    argv = [a for a in sys.argv[1:] if a != "--json"]
-    if len(argv) != len(sys.argv[1:]):
+    # Parse flags
+    flags = {"--json", "--yes", "--first"}
+    argv = [a for a in sys.argv[1:] if a not in flags]
+    raw_args = set(sys.argv[1:])
+    if "--json" in raw_args:
         JSON_MODE = True
+    if "--yes" in raw_args:
+        AUTO_YES = True
+    if "--first" in raw_args:
+        AUTO_FIRST = True
 
     ip = DEFAULT_IP
     off = 0
@@ -1491,9 +1639,13 @@ def main():
         off = 1
 
     if not ip:
-        print("Error: No device IP/hostname specified.")
-        print("Provide it via: CLI argument, FORMULER_IP env var, .env file, or config file.")
-        print(f"Config: {CONFIG_FILE}")
+        if JSON_MODE:
+            _json_out({"ok": False, "error": "No device IP/hostname specified",
+                        "hint": "Set FORMULER_IP env var, .env file, config file, or pass as first argument"})
+        else:
+            print("Error: No device IP/hostname specified.")
+            print("Provide it via: CLI argument, FORMULER_IP env var, .env file, or config file.")
+            print(f"Config: {CONFIG_FILE}")
         sys.exit(1)
 
     if not connect(ip, quiet=JSON_MODE):
@@ -1507,6 +1659,7 @@ def main():
     cmd_str = " ".join(remaining)
     dispatch(ip, cmd_str)
     run_adb("disconnect", tgt(ip))
+    sys.exit(_exit_code)
 
 
 if __name__ == "__main__":

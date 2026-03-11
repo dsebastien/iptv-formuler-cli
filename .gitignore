@@ -7,5 +7,8 @@ __pycache__/
 dist/
 build/
 .env
-.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/formuler-remote/
 formuler-iptv-notes.md
