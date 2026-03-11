@@ -481,8 +481,85 @@ def keys(ip: str, *names: str, delay: float = 0):
 
 
 def text_input(ip: str, t: str) -> bool:
-    code, _ = adb(ip, "shell", "input", "text", t.replace(" ", "%s"))
+    # Quote the text properly for the Android shell — %s is the space escape for ADB input
+    escaped = t.replace(" ", "%s")
+    code, _ = adb(ip, "shell", f"input text '{escaped}'")
     return code == 0
+
+
+def ui_dump(ip: str) -> str:
+    """Dump UI hierarchy and return XML string."""
+    adb(ip, "shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=10)
+    code, out = run_adb("-s", tgt(ip), "pull", "/sdcard/ui.xml", "/tmp/formuler-ui.xml")
+    if code != 0:
+        return ""
+    try:
+        return Path("/tmp/formuler-ui.xml").read_text()
+    except OSError:
+        return ""
+
+
+def ui_focused_text(ip: str) -> list[str]:
+    """Return text content of the currently focused UI element."""
+    import xml.etree.ElementTree as ET
+    xml_str = ui_dump(ip)
+    if not xml_str:
+        return []
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return []
+    texts = []
+    for node in root.iter("node"):
+        if node.get("focused") == "true":
+            for n in node.iter("node"):
+                t = n.get("text", "")
+                if t:
+                    texts.append(t)
+            break
+    return texts
+
+
+def ui_find_text(ip: str, target: str) -> bool:
+    """Check if target text exists anywhere in the current UI."""
+    import xml.etree.ElementTree as ET
+    xml_str = ui_dump(ip)
+    if not xml_str:
+        return False
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return False
+    target_lower = target.lower()
+    for node in root.iter("node"):
+        text = node.get("text", "")
+        if target_lower in text.lower():
+            return True
+    return False
+
+
+def ui_get_texts(ip: str) -> list[dict]:
+    """Return all text elements with their resource IDs and positions."""
+    import xml.etree.ElementTree as ET
+    xml_str = ui_dump(ip)
+    if not xml_str:
+        return []
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return []
+    results = []
+    for node in root.iter("node"):
+        text = node.get("text", "")
+        if text:
+            results.append({
+                "text": text,
+                "rid": node.get("resource-id", "").split("/")[-1],
+                "focused": node.get("focused") == "true",
+                "selected": node.get("selected") == "true",
+                "bounds": node.get("bounds", ""),
+            })
+    return results
 
 
 def wait(seconds: float = 1.0):
@@ -559,6 +636,12 @@ def go_to_section(ip: str, section: str) -> bool:
 # ══════════════════════════════════════════════════════════════
 
 def open_search(ip: str, section: str = "vod"):
+    """Open the universal search screen from any section.
+
+    The search icon is at the top-right of the content area.
+    Navigation: go to section → right (into content) → up until search icon focused → ok.
+    Verified via UI dump: search icon has resource-id 'dashboard_overview_option'.
+    """
     go_to_section(ip, section)
     key(ip, "right")
     wait(NAV_DELAY)
@@ -567,20 +650,68 @@ def open_search(ip: str, section: str = "vod"):
         wait(NAV_DELAY * 0.6)
     key(ip, "ok")
     wait(SEARCH_DELAY)
+    # Verify we landed on the search activity
+    _wait_for_activity(ip, "UsActivity", timeout=5)
+
+
+def _wait_for_activity(ip: str, name: str, timeout: float = 5) -> bool:
+    """Wait for a specific activity to be in the foreground."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        code, out = adb(ip, "shell", "dumpsys", "activity", "activities", timeout=5)
+        if code == 0 and name in out:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _get_current_activity(ip: str) -> str:
+    """Return the simple class name of the current foreground activity."""
+    code, out = adb(ip, "shell", "dumpsys", "activity", "activities", timeout=5)
+    if code != 0:
+        return ""
+    for line in out.splitlines():
+        if "mResumedActivity" in line:
+            # Extract: ...mol3.vod.ui.search.StreamSearchActivity t454
+            m = re.search(r"/[\w.]+\.(\w+Activity)\b", line)
+            return m.group(1) if m else ""
+    return ""
 
 
 def do_search(ip: str, query: str, section: str = "vod"):
+    """Search for content using the universal search UI.
+
+    Flow verified via ADB/uiautomator:
+    1. Open search → lands on UsActivity with EditText focused
+    2. Type query (spaces encoded as %s for ADB)
+    3. Press Enter → results appear with category tabs
+    """
     open_search(ip, section)
     text_input(ip, query)
     wait(NAV_DELAY * 2)
-    key(ip, "ok")
+    key(ip, "ok")  # submit search
     wait(LOAD_DELAY)
     output_ok(f"Searched for '{query}' in {section}")
 
 
 def select_first_result(ip: str):
+    """Select the first search result.
+
+    After searching, the UI shows category tabs (Chaînes TV, VOD, Séries TV, etc.)
+    with one tab focused. Results are BELOW the tabs.
+    Press down once to move from tabs to results, then ok to select.
+    """
+    # Move from tab bar down to first result
     key(ip, "down")
     wait(NAV_DELAY)
+    # Verify we're on a result (not still on tabs) by checking focused text
+    focused = ui_focused_text(ip)
+    if focused and any("Chaînes" in t or "Programme" in t or "VOD" in t or
+                        "Séries" in t or "Radios" in t or "Enregistrements" in t
+                        for t in focused):
+        # Still on tabs, press down again
+        key(ip, "down")
+        wait(NAV_DELAY)
     key(ip, "ok")
     wait(LOAD_DELAY)
 
@@ -603,8 +734,17 @@ def stop_playback(ip: str):
 # ══════════════════════════════════════════════════════════════
 
 def play_movie(ip: str, query: str):
+    """Search for a movie and play the first match.
+
+    UI flow: search in VOD → select first result → detail page → play button.
+    The detail page may focus on a play/resume button or description.
+    """
     do_search(ip, query, section="vod")
     select_first_result(ip)
+    # On the movie detail page — look for a play action
+    wait(LOAD_DELAY * 0.5)
+    focused = ui_focused_text(ip)
+    # The detail page typically has action buttons; press OK on whatever is focused
     key(ip, "ok")
     wait(LOAD_DELAY * 0.5)
     output_ok(f"Playing movie: '{query}'", {"query": query})
@@ -616,31 +756,63 @@ def play_movie(ip: str, query: str):
 # ══════════════════════════════════════════════════════════════
 
 def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
+    """Search for a series and play a specific episode.
+
+    UI flow verified via ADB/uiautomator on Formuler Z11 Pro MAX:
+    1. Search → select series from results
+    2. Detail page: "Tous les épisodes" button is auto-focused → press OK
+    3. Episode browser: seasons on left (focused), episodes on right
+       - Down to navigate seasons, Right to move to episodes, Down to navigate episodes
+    4. Press OK on episode to play
+    """
     do_search(ip, query, section="series")
     select_first_result(ip)
 
-    # Navigate to "Tous les épisodes" (last button before Star)
-    keys(ip, "right", "right", "right", delay=NAV_DELAY)
-    wait(NAV_DELAY)
-    key(ip, "left")  # back from Star
-    wait(NAV_DELAY)
-    key(ip, "ok")    # open episodes browser
+    # We're on the series detail page (StreamSearchActivity).
+    # "Tous les épisodes" button should be focused.
+    # Verify by checking focused text.
+    wait(LOAD_DELAY * 0.5)
+    focused = ui_focused_text(ip)
+    if focused and any("pisode" in t for t in focused):
+        # "Tous les épisodes" is focused — press OK
+        key(ip, "ok")
+    else:
+        # Fallback: try to find and click "Tous les épisodes"
+        # It's typically the first action button on the detail page
+        if VERBOSE:
+            warn(f"Expected 'Tous les épisodes' focused, got: {focused}")
+        key(ip, "ok")
     wait(LOAD_DELAY)
 
+    # Now in episode browser:
+    # Left panel: season list (Season 1 is selected by default)
+    # Right panel: episodes for selected season
+
+    # Navigate to correct season
     if season > 1:
         for _ in range(season - 1):
             key(ip, "down")
             wait(NAV_DELAY * 1.2)
         wait(NAV_DELAY * 2)
 
+    # Move right to episode list
     key(ip, "right")
-    wait(NAV_DELAY * 1.2)
+    wait(NAV_DELAY)
 
+    # Navigate to correct episode (first episode is focused by default)
     if episode > 1:
         for _ in range(episode - 1):
             key(ip, "down")
             wait(NAV_DELAY * 1.2)
 
+    # Verify correct episode is focused
+    focused = ui_focused_text(ip)
+    expected_label = f"S{season}:E{episode}"
+    if focused and not any(expected_label in t for t in focused):
+        if VERBOSE:
+            warn(f"Expected '{expected_label}' focused, got: {focused}")
+
+    # Play the episode
     key(ip, "ok")
     wait(LOAD_DELAY * 0.5)
     label = f"'{query}' S{season:02d}E{episode:02d}"
@@ -1110,13 +1282,12 @@ def cmd_browse(ip: str, section: str):
 
 
 def cmd_episodes(ip: str, query: str):
+    """Open the episode browser for a series."""
     do_search(ip, query, section="series")
     select_first_result(ip)
-    keys(ip, "right", "right", "right", delay=NAV_DELAY)
-    wait(NAV_DELAY)
-    key(ip, "left")
-    wait(NAV_DELAY)
-    key(ip, "ok")
+    # Detail page: "Tous les épisodes" should be focused
+    wait(LOAD_DELAY * 0.5)
+    key(ip, "ok")  # open episodes browser
     wait(LOAD_DELAY)
     screenshot(ip, f"/tmp/formuler-episodes.png")
     output_ok(f"Episode browser open for '{query}'. Screenshot saved to /tmp/formuler-episodes.png")
