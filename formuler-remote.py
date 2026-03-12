@@ -39,7 +39,7 @@ Prerequisites:
   3. Find device IP: Settings > Network (on the Formuler)
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import datetime
 import json
@@ -285,6 +285,7 @@ COMMANDS = {
     # Browsing
     "resume": {"args": "[vod|series|live]", "desc": "Resume last watched content from history"},
     "info": {"args": "<query>", "desc": "Show content details from local database"},
+    "vod-history": {"args": "[count] [filter]", "desc": "Show VOD/series watch history"},
     # EPG
     "epg": {"args": "[channel]", "desc": "Show EPG info overlay and take screenshot"},
     "guide": {"args": "", "desc": "Open full EPG guide and take screenshot"},
@@ -742,21 +743,41 @@ def stop_playback(ip: str):
 def play_movie(ip: str, query: str):
     """Search for a movie and play the first match.
 
-    Strategy:
-    1. Try instant launch via cached intent (favorites/history) — no UI needed
-    2. Fall back to UI search if not in cache
+    Strategy (fast path — 1-2 ADB commands, <5s):
+    1. Query content provider for matching VOD in favorites/history
+    2. Extract intent_uri or build deeplink from stalker URL
+    3. Fire deeplink with channel_type=1 (history) → auto-plays
 
-    UI fallback flow (verified via ADB/uiautomator):
+    Fallback (slow path — UI navigation):
     1. Search in VOD → select first result → detail overlay opens
-    2. Focus lands on description (scroll area)
-    3. Down → focus moves to "Regarder" (Watch) button
-    4. OK → playback starts
+    2. Down → "Regarder" (Watch) button → OK → playback starts
     """
-    # Fast path: try intent from favorites/history
-    if _play_by_intent(ip, query, ("VOD Favorites", "VOD History")):
-        output_ok(f"Playing movie (instant): '{query}'", {"query": query, "method": "intent"})
-        _notify("Formuler Remote", f"Playing: {query}")
-        return
+    # Fast path: query content provider and launch deeplink
+    matches = _query_vod_content(ip, query, stream_type="movie")
+    if matches:
+        match = matches[0]
+        intent = match.get("intent_uri", "")
+        # Use existing intent or build one from content data
+        if not intent and match["stream_id"]:
+            intent = _build_stalker_deeplink("movie", match["stream_id"], match["category_id"])
+        if intent:
+            ensure_mytv(ip)  # deeplink needs MOL3 running
+            if launch_intent(ip, intent):
+                # Deeplink with history channel_type auto-plays without detail page.
+                # Verify if connection is stable, otherwise trust the deeplink.
+                verified = _verify_playback(ip, timeout=3.5)
+                method = "deeplink" if verified else "deeplink+ok"
+                if not verified:
+                    # Safety: press down+OK in case detail page appeared
+                    key(ip, "down")
+                    wait(NAV_DELAY)
+                    key(ip, "ok")
+                output_ok(f"Playing movie: '{match['title']}'", {
+                    "query": query, "title": match["title"],
+                    "stream_id": match["stream_id"], "method": method
+                })
+                _notify("Formuler Remote", f"Playing: {match['title']}")
+                return
 
     # Slow path: UI-based search
     do_search(ip, query, section="vod")
@@ -778,27 +799,38 @@ def play_movie(ip: str, query: str):
 def play_series(ip: str, query: str, season: int = 1, episode: int = 1):
     """Search for a series and play a specific episode.
 
-    Strategy:
-    1. Try instant launch via cached intent (favorites/history) — no UI needed.
-       For series, we can rewrite the season_id and episode_id in the stalker:// URL.
-    2. Fall back to UI search if not in cache.
+    Strategy (fast path — 1-2 ADB commands, <5s):
+    1. Query content provider for matching series in favorites/history
+    2. Build deeplink with target season/episode using stalker:// URL
+    3. Fire deeplink with channel_type=2 (series history) → auto-plays
 
-    UI fallback flow (verified via ADB/uiautomator):
+    Fallback (slow path — UI navigation):
     1. Search → select series → "Tous les épisodes" (auto-focused) → OK
     2. Episode browser: seasons left, episodes right
     3. Down×(S-1) for season, Right, Down×(E-1) for episode, OK to play
     """
     label = f"'{query}' S{season:02d}E{episode:02d}"
 
-    # Fast path: try intent from favorites/history
-    matches = _find_content(query, ("Series Favorites", "Series History"))
+    # Fast path: query content provider and build targeted deeplink
+    matches = _query_vod_content(ip, query, stream_type="tv")
     if matches:
-        intent = matches[0].get("intent", "")
-        if intent and "vod_unique_id" in intent:
-            modified = _build_series_intent(intent, season, episode)
-            if launch_intent(ip, modified):
-                output_ok(f"Playing {label} (instant)", {
-                    "query": query, "season": season, "episode": episode, "method": "intent"
+        match = matches[0]
+        stream_id = match["stream_id"]
+        category_id = match["category_id"]
+        if stream_id and category_id:
+            ensure_mytv(ip)  # deeplink needs MOL3 running
+            intent = _build_stalker_deeplink("tv", stream_id, category_id, season, episode)
+            if launch_intent(ip, intent):
+                # Deeplink with history channel_type auto-plays without detail page.
+                verified = _verify_playback(ip, timeout=3.5)
+                method = "deeplink" if verified else "deeplink+ok"
+                if not verified:
+                    # Safety: press OK in case detail page appeared
+                    key(ip, "ok")
+                output_ok(f"Playing {label}", {
+                    "query": query, "title": match["title"],
+                    "stream_id": stream_id, "season": season,
+                    "episode": episode, "method": method
                 })
                 _notify("Formuler Remote", f"Playing: {label}")
                 return
@@ -1106,6 +1138,92 @@ def launch_intent(ip: str, intent_uri: str) -> bool:
 
 # Backward compat alias
 tune_by_intent = launch_intent
+
+
+def _build_stalker_deeplink(stream_type: str, stream_id: int | str, category_id: int | str,
+                            season: int | None = None, episode: int | None = None) -> str:
+    """Build a deeplink intent URI from content identifiers.
+
+    Uses channel_type=1 (VOD history) for movies and channel_type=2 (series history)
+    for series. History-type intents auto-play without showing the detail page.
+    """
+    stalker_url = (f"stalker://tv.formuler.stream?server_id=0"
+                   f"&category_id={category_id}&stream_type={stream_type}&stream_id={stream_id}")
+    if stream_type == "tv" and season is not None and episode is not None:
+        stalker_url += f"&season_id={stream_id}:{season}&episode_id={episode}"
+        channel_type = 2  # series history → auto-plays
+    else:
+        channel_type = 1  # VOD history → auto-plays
+
+    return (f"intent:#Intent;component={MOL3_PKG}/tv.formuler.mol3.deeplink.SchemeLinkActivity;"
+            f"S.vod_unique_id={stalker_url};i.channel_type={channel_type};end")
+
+
+def _verify_playback(ip: str, timeout: float = 3.5) -> bool:
+    """Check that StreamActivity is the focused activity (playback started).
+
+    Uses grep on device-side to minimize data transfer over slow connections.
+    """
+    time.sleep(1.5)
+    for _ in range(max(1, int(timeout))):
+        # Use single-string shell command so pipe works on device
+        code, out = adb(ip, "shell",
+                        "dumpsys activity activities | grep -m1 mResumedActivity",
+                        timeout=4)
+        if code == 0 and "StreamActivity" in out:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _query_vod_content(ip: str, query: str, stream_type: str = "") -> list[dict]:
+    """Search content provider for VOD/series matching query.
+
+    Returns list of dicts with title, stream_type, stream_id, category_id,
+    season, episode, intent_uri, channel_id, description.
+    """
+    channels = get_channels(ip)
+    if not channels:
+        return []
+
+    # Determine which categories to search based on stream_type
+    if stream_type == "movie":
+        cats = ("VOD Favorites", "VOD History")
+    elif stream_type == "tv":
+        cats = ("Series Favorites", "Series History")
+    else:
+        cats = ("VOD Favorites", "VOD History", "Series Favorites", "Series History")
+
+    filtered = [c for c in channels if c.get("category") in cats]
+    matches = _fuzzy_match(query, filtered)
+
+    results = []
+    for m in matches:
+        intent = m.get("intent", "")
+        content_id = m.get("content_id", "")
+        stalker_url = content_id or ""
+
+        # Parse stalker URL for structured data
+        sid_m = re.search(r"stream_id=(\d+)", stalker_url)
+        cat_m = re.search(r"category_id=(\d+)", stalker_url)
+        type_m = re.search(r"stream_type=(\w+)", stalker_url)
+        season_m = re.search(r"season_id=\d+[%3A:]+(\d+)", stalker_url)
+        ep_m = re.search(r"episode_id=(\d+)", stalker_url)
+
+        results.append({
+            "title": m.get("title", ""),
+            "stream_type": type_m.group(1) if type_m else "",
+            "stream_id": int(sid_m.group(1)) if sid_m else 0,
+            "category_id": int(cat_m.group(1)) if cat_m else 0,
+            "season": int(season_m.group(1)) if season_m else None,
+            "episode": int(ep_m.group(1)) if ep_m else None,
+            "intent_uri": intent,
+            "channel_id": m.get("category_id", 0),
+            "category": m.get("category", ""),
+            "description": m.get("description", ""),
+            "logo": m.get("logo", ""),
+        })
+    return results
 
 
 def _find_content(query: str, categories: tuple[str, ...]) -> list[dict]:
@@ -1446,6 +1564,63 @@ def cmd_info(ip: str, query: str, content_type: str = ""):
             print(f"  {m['description']}")
         if m.get("logo"):
             print(f"  {_C.DIM}Logo: {m['logo']}{_C.RESET}")
+
+
+def cmd_vod_history(ip: str, count: int = 20, filter_text: str = ""):
+    """Show VOD and series watch history from the content provider.
+
+    Displays title, type (movie/series), season/episode for series,
+    and category. History entries are from the device's preview_program
+    content provider (channels 3=VOD History, 5=Series History).
+    """
+    channels = get_channels(ip, force_refresh=True)
+    history = [c for c in channels if c.get("category") in ("VOD History", "Series History")]
+
+    if filter_text:
+        history = _fuzzy_match(filter_text, history)
+
+    if not history:
+        error("No VOD/series history found.")
+        return
+
+    entries = []
+    for h in history[:count]:
+        # Parse stalker URL from content_id for episode info
+        content_id = h.get("content_id", "")
+        stalker_url = content_id or ""
+
+        # Extract structured data
+        type_m = re.search(r"stream_type=(\w+)", stalker_url)
+        sid_m = re.search(r"stream_id=(\d+)", stalker_url)
+        cat_m = re.search(r"category_id=(\d+)", stalker_url)
+        season_m = re.search(r"season_id=\d+[%3A:]+(\d+)", stalker_url)
+        ep_m = re.search(r"episode_id=(\d+)", stalker_url)
+
+        stream_type = type_m.group(1) if type_m else "unknown"
+        entry = {
+            "title": h.get("title", ""),
+            "type": "series" if stream_type == "tv" else "movie",
+            "stream_id": int(sid_m.group(1)) if sid_m else None,
+            "category_id": int(cat_m.group(1)) if cat_m else None,
+            "category": h.get("category", ""),
+            "description": h.get("description", ""),
+        }
+        if stream_type == "tv":
+            entry["season"] = int(season_m.group(1)) if season_m else None
+            entry["episode"] = int(ep_m.group(1)) if ep_m else None
+        entries.append(entry)
+
+    if JSON_MODE:
+        output(entries)
+        return
+
+    print(f"\n  {_C.BOLD}Watch History{_C.RESET} ({len(entries)} entries)\n")
+    for e in entries:
+        type_badge = f"{_C.MAGENTA}SERIES{_C.RESET}" if e["type"] == "series" else f"{_C.BLUE}MOVIE {_C.RESET}"
+        ep_info = ""
+        if e["type"] == "series" and e.get("season") is not None:
+            ep_info = f" {_C.CYAN}S{e['season']:02d}E{e.get('episode', 0):02d}{_C.RESET}"
+        print(f"  [{type_badge}]{ep_info} {e['title']}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1929,6 +2104,7 @@ HELP_TEXT = f"""
   {_C.CYAN}BROWSING{_C.RESET}
     resume [vod|series|live]        resume last watched
     info <query>                    show details from local database
+    vod-history [count] [filter]    show VOD/series watch history
 
   {_C.CYAN}EPG{_C.RESET}
     epg [channel]                   show EPG info overlay + screenshot
@@ -2088,6 +2264,10 @@ def dispatch(ip: str, raw: str) -> bool:
         cmd_resume(ip, args[0] if args else "vod")
     elif cmd == "info" and atxt:
         cmd_info(ip, atxt)
+    elif cmd == "vod-history":
+        cnt = int(args[0]) if args and args[0].isdigit() else 20
+        filt = " ".join(args[1:]) if len(args) > 1 else (" ".join(args) if args and not args[0].isdigit() else "")
+        cmd_vod_history(ip, cnt, filt)
 
     # EPG
     elif cmd == "epg":
@@ -2229,7 +2409,7 @@ def _make_completer(ip: str):
         "section", "browse", "channel",
         "search-vod", "play-movie", "stop-vod",
         "search-series", "play-series", "episodes",
-        "resume", "info",
+        "resume", "info", "vod-history",
         "epg", "guide", "search-epg", "now-playing",
         "star", "star-vod", "star-series",
         "macro", "macros", "at", "timers", "cancel-timer",
