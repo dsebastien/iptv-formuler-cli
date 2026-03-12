@@ -6,7 +6,8 @@ allowed-tools: Bash
 
 # Formuler Remote Control
 
-Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI (75 commands).
+Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI (75+ commands).
+Uses direct deeplinks via the Android content provider for instant VOD/series playback (<5s).
 
 ## Critical Rules
 
@@ -40,6 +41,7 @@ Controls a Formuler Z11 Pro MAX IPTV box via ADB using the `formuler-remote` CLI
 | Screenshot | `formuler-remote --json screenshot /tmp/screen.png` |
 | EPG info | `formuler-remote --json epg` |
 | Open guide | `formuler-remote --json guide` |
+| VOD history | `formuler-remote --json vod-history` |
 | Resume last | `formuler-remote --json --first resume vod` |
 | Wake device | `formuler-remote --json wake` |
 | Power off | `formuler-remote --json power-off` |
@@ -113,6 +115,21 @@ echo -e "tune TF1\nwait 3\nscreenshot" | formuler-remote --json --first
 formuler-remote --json --first play-movie "batman"
 formuler-remote --json --first play-series "breaking bad" 2 5
 ```
+
+**Fast path (v1.2.0+):** `play-movie` and `play-series` now use deeplinks via the content provider.
+If the content is in favorites/history, it fires a direct intent to SchemeLinkActivity (~1-2 ADB commands, <5s).
+Falls back to UI search only when content is not in the cache. No screenshots needed in the fast path.
+
+### Watch history
+
+```bash
+formuler-remote --json vod-history              # all history (default 20 entries)
+formuler-remote --json vod-history 5            # last 5 entries
+formuler-remote --json vod-history batman        # filter by query
+```
+
+Shows VOD and series watch history from the device's content provider.
+For series, includes last-watched season/episode.
 
 ### Sleep timer
 
