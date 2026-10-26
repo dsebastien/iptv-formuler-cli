@@ -415,7 +415,8 @@ def run_adb(*args: str, timeout: int = 10) -> tuple[int, str]:
         return 0, ""
     try:
         result = subprocess.run(
-            ["adb", *args], capture_output=True, text=True, timeout=timeout
+            ["adb", *args], capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",  # device output is UTF-8, not the Windows locale
         )
         return result.returncode, (result.stdout + result.stderr).strip()
     except subprocess.TimeoutExpired:
