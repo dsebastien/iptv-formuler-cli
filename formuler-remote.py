@@ -48,11 +48,26 @@ import re
 import subprocess
 import sys
 import shutil
+import tempfile
 import threading
 import time
 import unicodedata
-import readline  # arrow-key history in interactive mode
 from pathlib import Path
+
+try:
+    import readline  # arrow-key history in interactive mode
+except ImportError:
+    readline = None  # Windows without pyreadline3: no completion/history
+
+if os.name == "nt":
+    os.system("")  # enable ANSI escape sequences in the Windows console
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except AttributeError:
+            pass
+
+TMP_DIR = Path(tempfile.gettempdir())
 
 # ──────────────────────── Color Support ────────────────────────
 
@@ -86,7 +101,7 @@ def _load_env(path: Path) -> dict[str, str]:
     env: dict[str, str] = {}
     if not path.exists():
         return env
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -106,7 +121,7 @@ def _load_config() -> dict:
             pass
     if CONFIG_JSON.exists():
         try:
-            with open(CONFIG_JSON) as f:
+            with open(CONFIG_JSON, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -313,7 +328,7 @@ COMMANDS = {
     "key": {"args": "<keyname>", "desc": "Send a single key event"},
     "open": {"args": "<app>", "desc": "Launch app (youtube/netflix/prime/mytv/plex/kodi/vlc/disney/settings)"},
     "apps": {"args": "", "desc": "List installed third-party apps"},
-    "screenshot": {"args": "[path]", "desc": "Capture screen to file (default /tmp/formuler-screenshot.png)"},
+    "screenshot": {"args": "[path]", "desc": "Capture screen to file (default: temp dir/formuler-screenshot.png)"},
     "status": {"args": "", "desc": "Show device info (model, Android version, uptime, foreground app)"},
     "reboot": {"args": "", "desc": "Reboot device (requires --yes to skip confirmation)"},
     "export-m3u": {"args": "[path]", "desc": "Export channel lineup as M3U playlist (metadata only, no stream URLs)"},
@@ -504,11 +519,11 @@ def text_input(ip: str, t: str) -> bool:
 def ui_dump(ip: str) -> str:
     """Dump UI hierarchy and return XML string."""
     adb(ip, "shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=10)
-    code, out = run_adb("-s", tgt(ip), "pull", "/sdcard/ui.xml", "/tmp/formuler-ui.xml")
+    code, out = run_adb("-s", tgt(ip), "pull", "/sdcard/ui.xml", str(TMP_DIR / "formuler-ui.xml"))
     if code != 0:
         return ""
     try:
-        return Path("/tmp/formuler-ui.xml").read_text()
+        return (TMP_DIR / "formuler-ui.xml").read_text(encoding="utf-8")
     except OSError:
         return ""
 
@@ -966,12 +981,12 @@ def search_provider(ip: str, query: str) -> list[dict]:
 
 def get_channels(ip: str, force_refresh: bool = False) -> list[dict]:
     if not force_refresh and CHANNELS_CACHE.exists():
-        with open(CHANNELS_CACHE) as f:
+        with open(CHANNELS_CACHE, encoding="utf-8") as f:
             return json.load(f)
     channels = fetch_channels(ip)
     if channels:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CHANNELS_CACHE, "w") as f:
+        with open(CHANNELS_CACHE, "w", encoding="utf-8") as f:
             json.dump(channels, f, indent=2, ensure_ascii=False)
         info(f"Cached {len(channels)} channels/entries")
     return channels
@@ -1005,14 +1020,14 @@ def get_full_channels(ip: str, force_refresh: bool = False) -> list[dict]:
     if not force_refresh and FULL_CHANNELS_CACHE.exists():
         age_hours = (time.time() - FULL_CHANNELS_CACHE.stat().st_mtime) / 3600
         if age_hours < max_age:
-            with open(FULL_CHANNELS_CACHE) as f:
+            with open(FULL_CHANNELS_CACHE, encoding="utf-8") as f:
                 return json.load(f)
         warn(f"Channel cache stale ({age_hours:.0f}h old). Refreshing...")
 
     channels = enumerate_channels(ip)
     if channels:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(FULL_CHANNELS_CACHE, "w") as f:
+        with open(FULL_CHANNELS_CACHE, "w", encoding="utf-8") as f:
             json.dump(channels, f, indent=2, ensure_ascii=False)
         info(f"Cached {len(channels)} channels")
     return channels
@@ -1032,7 +1047,7 @@ def channel_by_number(ip: str, number: str) -> dict | None:
 def _load_tune_history() -> list[dict]:
     if TUNE_HISTORY_FILE.exists():
         try:
-            with open(TUNE_HISTORY_FILE) as f:
+            with open(TUNE_HISTORY_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError):
             pass
@@ -1041,7 +1056,7 @@ def _load_tune_history() -> list[dict]:
 
 def _save_tune_history(history: list[dict]):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(TUNE_HISTORY_FILE, "w") as f:
+    with open(TUNE_HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history[-50:], f, indent=2, ensure_ascii=False)
 
 
@@ -1235,7 +1250,7 @@ def _find_content(query: str, categories: tuple[str, ...]) -> list[dict]:
     if not CHANNELS_CACHE.exists():
         return []
     try:
-        with open(CHANNELS_CACHE) as f:
+        with open(CHANNELS_CACHE, encoding="utf-8") as f:
             channels = json.load(f)
     except (json.JSONDecodeError, OSError):
         return []
@@ -1305,7 +1320,7 @@ def cmd_tune(ip: str, query: str):
 
     # Try full channel cache first
     if FULL_CHANNELS_CACHE.exists():
-        with open(FULL_CHANNELS_CACHE) as f:
+        with open(FULL_CHANNELS_CACHE, encoding="utf-8") as f:
             full = json.load(f)
         # Try exact channel number
         if query.isdigit():
@@ -1499,8 +1514,8 @@ def cmd_episodes(ip: str, query: str):
     wait(LOAD_DELAY * 0.5)
     key(ip, "ok")  # open episodes browser
     wait(LOAD_DELAY)
-    screenshot(ip, f"/tmp/formuler-episodes.png")
-    output_ok(f"Episode browser open for '{query}'. Screenshot saved to /tmp/formuler-episodes.png")
+    screenshot(ip, str(TMP_DIR / "formuler-episodes.png"))
+    output_ok(f"Episode browser open for '{query}'. Screenshot saved to {TMP_DIR / 'formuler-episodes.png'}")
     if not JSON_MODE:
         print("Navigate with arrow keys. 'back' to return.")
 
@@ -1633,7 +1648,7 @@ def cmd_epg(ip: str, channel: str = ""):
         wait(3)
     key(ip, "info")
     wait(1)
-    path = "/tmp/formuler-epg.png"
+    path = str(TMP_DIR / "formuler-epg.png")
     screenshot(ip, path)
     output_ok(f"EPG info screenshot saved to {path}", {"screenshot": path})
     key(ip, "info")  # dismiss
@@ -1643,7 +1658,7 @@ def cmd_guide(ip: str):
     ensure_mytv(ip)
     key(ip, "guide")
     wait(2)
-    path = "/tmp/formuler-guide.png"
+    path = str(TMP_DIR / "formuler-guide.png")
     screenshot(ip, path)
     output_ok(f"EPG guide screenshot saved to {path}", {"screenshot": path})
 
@@ -1909,7 +1924,7 @@ def cmd_cec(ip: str, action: str):
         output_err(f"Unknown CEC action: {action}. Use: on, off, standby")
 
 
-def cmd_record_screen(ip: str, duration: int = 30, path: str = "/tmp/formuler-recording.mp4"):
+def cmd_record_screen(ip: str, duration: int = 30, path: str = str(TMP_DIR / "formuler-recording.mp4")):
     remote = "/sdcard/recording.mp4"
     info(f"Recording for {duration}s... (video surfaces will be green due to DRM)")
     try:
@@ -1948,7 +1963,7 @@ def cmd_history(count: int = 20):
     if not history_file.exists():
         output_err("No command history found.")
         return
-    lines = history_file.read_text().splitlines()
+    lines = history_file.read_text(encoding="utf-8").splitlines()
     recent = lines[-count:] if count < len(lines) else lines
     if JSON_MODE:
         output(recent)
@@ -1957,7 +1972,7 @@ def cmd_history(count: int = 20):
             print(f"  {i:3d}  {line}")
 
 
-def cmd_watch(ip: str, interval: float = 5.0, directory: str = "/tmp"):
+def cmd_watch(ip: str, interval: float = 5.0, directory: str = str(TMP_DIR)):
     """Take screenshots at regular intervals until Ctrl-C."""
     info(f"Watching every {interval}s to {directory}/ (Ctrl-C to stop)")
     try:
@@ -2011,7 +2026,7 @@ def go_to_channel_number(ip: str, number: str):
     key(ip, "ok")
 
 
-def screenshot(ip: str, path: str = "/tmp/formuler-screenshot.png"):
+def screenshot(ip: str, path: str = str(TMP_DIR / "formuler-screenshot.png")):
     remote = "/sdcard/screenshot.png"
     code, out = adb(ip, "shell", "screencap", "-p", remote)
     if code != 0:
@@ -2315,7 +2330,7 @@ def dispatch(ip: str, raw: str) -> bool:
         cmd_cec(ip, args[0])
     elif cmd == "record":
         dur = int(args[0]) if args and args[0].isdigit() else 30
-        path = args[1] if len(args) > 1 else "/tmp/formuler-recording.mp4"
+        path = args[1] if len(args) > 1 else str(TMP_DIR / "formuler-recording.mp4")
         cmd_record_screen(ip, dur, path)
 
     # Text / direct key
@@ -2343,7 +2358,7 @@ def dispatch(ip: str, raw: str) -> bool:
         cmd_history(int(args[0]) if args and args[0].isdigit() else 20)
     elif cmd == "watch":
         interval = float(args[0]) if args and args[0].replace(".", "").isdigit() else 5.0
-        directory = args[1] if len(args) > 1 else "/tmp"
+        directory = args[1] if len(args) > 1 else str(TMP_DIR)
         cmd_watch(ip, interval, directory)
 
     # Connectivity
@@ -2352,7 +2367,7 @@ def dispatch(ip: str, raw: str) -> bool:
 
     # Misc
     elif cmd == "screenshot":
-        screenshot(ip, args[0] if args else "/tmp/formuler-screenshot.png")
+        screenshot(ip, args[0] if args else str(TMP_DIR / "formuler-screenshot.png"))
     elif cmd == "status":
         cmd_status(ip)
     elif cmd == "reboot":
@@ -2433,7 +2448,7 @@ def _make_completer(ip: str):
     channel_names: list[str] = []
     if CHANNELS_CACHE.exists():
         try:
-            with open(CHANNELS_CACHE) as f:
+            with open(CHANNELS_CACHE, encoding="utf-8") as f:
                 channel_names = list(set(c["title"] for c in json.load(f)))
         except (json.JSONDecodeError, KeyError):
             pass
@@ -2476,18 +2491,19 @@ def interactive(ip: str):
     if channels:
         print(f"Channel database: {_C.BOLD}{len(channels)}{_C.RESET} entries")
 
-    # Setup tab completion
-    readline.set_completer(_make_completer(ip))
-    readline.parse_and_bind("tab: complete")
-    readline.set_completer_delims(" ")
-
-    # Setup history file
     history_file = CACHE_DIR / "history"
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        readline.read_history_file(history_file)
-    except FileNotFoundError:
-        pass
+    if readline:
+        # Setup tab completion
+        readline.set_completer(_make_completer(ip))
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer_delims(" ")
+
+        # Setup history file
+        try:
+            readline.read_history_file(history_file)
+        except (FileNotFoundError, OSError):
+            pass
 
     print(HELP_TEXT)
 
@@ -2503,10 +2519,11 @@ def interactive(ip: str):
         if not dispatch_chain(ip, raw):
             break
 
-    try:
-        readline.write_history_file(history_file)
-    except OSError:
-        pass
+    if readline:
+        try:
+            readline.write_history_file(history_file)
+        except OSError:
+            pass
 
     # Cancel pending timers
     for t in _timers:
@@ -2554,7 +2571,10 @@ def main():
     global JSON_MODE, AUTO_YES, AUTO_FIRST, VERBOSE, ADB_TIMEOUT
 
     if not shutil.which("adb"):
-        print("Error: adb not found. Install with: sudo pacman -S android-tools")
+        if os.name == "nt":
+            print("Error: adb not found. Install with: winget install Google.PlatformTools")
+        else:
+            print("Error: adb not found. Install with: sudo pacman -S android-tools")
         sys.exit(1)
 
     # Parse flags (including value-bearing ones)
@@ -2624,7 +2644,7 @@ def main():
 
     # Acquire lock to prevent concurrent instances
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    _lock_file = open(CACHE_DIR / ".lock", "w")
+    _lock_file = open(CACHE_DIR / ".lock", "w", encoding="utf-8")
     try:
         import fcntl
         fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -48,6 +48,9 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 
    # macOS
    brew install android-platform-tools
+
+   # Windows
+   winget install Google.PlatformTools
    ```
 3. **Enable ADB on your Formuler**: Settings > System > Developer Options > ADB Debugging > ON
 4. **Note your device IP**: Settings > Network
@@ -85,6 +88,26 @@ cp formuler-remote.py ~/.local/bin/
 mkdir -p ~/.claude/skills/formuler-remote
 cp .claude/skills/formuler-remote/SKILL.md ~/.claude/skills/formuler-remote/
 ```
+
+### Windows
+
+`install.sh` needs bash; on Windows install manually (PowerShell):
+
+```powershell
+git clone https://github.com/BlazeForce-NL/iptv-formuler-cli.git
+cd iptv-formuler-cli
+pip install pyreadline3   # optional: tab completion + history in interactive mode
+python formuler-remote.py <your-device-ip> ping
+# Optional: install Claude Code skill
+New-Item -ItemType Directory -Force "$HOME\.claude\skills\formuler-remote"
+Copy-Item .claude\skills\formuler-remote\SKILL.md "$HOME\.claude\skills\formuler-remote\"
+```
+
+Notes:
+- Screenshots, recordings and UI dumps default to `%TEMP%` instead of `/tmp`.
+- Config and cache live in `%USERPROFILE%\.config\formuler-remote` and `%USERPROFILE%\.cache\formuler-remote`.
+- Without `pyreadline3` the interactive mode works, but without tab completion and history.
+- The single-instance lock is not enforced on Windows.
 
 ## Uninstall
 
