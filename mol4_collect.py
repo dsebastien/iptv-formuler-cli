@@ -33,7 +33,7 @@ Y0, ROWS, W = 100, 320, 1920  # header band sent by the box (rows 100..420)
 
 def _band_to_png(raw, path):
     """Rebuild a full 1920x1080 PNG (black outside the band) so the OCR boxes stay valid."""
-    subprocess.run(["magick", "-size", f"{W}x{ROWS}", "-depth", "8", "rgba:-", "-background", "black",
+    subprocess.run([m.MAGICK, "-size", f"{W}x{ROWS}", "-depth", "8", "rgba:-", "-background", "black",
                     "-extent", f"{W}x1080-0-{Y0}", path], input=raw, check=True)
     return path
 

@@ -39,7 +39,7 @@ Prerequisites:
   3. Find device IP: Settings > Network (on the Formuler)
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 import datetime
 import json

@@ -61,7 +61,18 @@ curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/i
 This will:
 - Check for Python 3.10+ and ADB (offering to install ADB if missing)
 - Download the script to `~/.local/bin/` with a `formuler-remote` symlink
+- Install the MyTVOnline 4 tools (see below) to `~/.local/share/formuler-remote/`, with their own
+  Python environment (NumPy, PyAV) and the commands `formuler-mol4-star`, `formuler-mol4-scan`,
+  `formuler-mol4-collect` and `formuler-imdb-match` in `~/.local/bin/`. It offers to install
+  tesseract and ImageMagick (needed) and scrcpy (optional, much faster)
 - Install the Claude Code skill to `~/.claude/skills/formuler-remote/`
+
+Options: `--no-mol4` skips the MyTVOnline 4 tools, `--yes` answers yes to every prompt, and
+`REF=v1.3.0` installs a release instead of `main`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/install.sh | REF=v1.3.0 bash -s -- --yes
+```
 
 Or install manually:
 
@@ -465,9 +476,35 @@ Channel names support fuzzy matching:
 - **No root required**: Standard ADB debugging is sufficient
 - **No credentials**: Channel tuning uses device intents, not IPTV credentials
 
+## MyTVOnline 4 tools
+
+In November 2026 the Z11 updated `tv.formuler.mol3.real` to 12.2.5, which is **MyTVOnline 4** under
+the MOL3 package name. MOL4 has a different UI and exposes no text to `uiautomator`, so the MOL3
+key sequences of `formuler-remote` do not fit it. The `mol4` tools drive MOL4 from screenshots and
+OCR. They need `FORMULER_IP`.
+
+```bash
+export FORMULER_IP=<your-device-ip>
+
+# Star series or movies (reads the star first: the star is a toggle)
+formuler-mol4-star --scrcpy --type series "Silo" "robot=>Mr Robot"
+formuler-mol4-star --scrcpy --type vod --prefer MULTI "Battlestar Galactica"
+formuler-mol4-star --scrcpy --unstar --type series "arrow=>Allen v Farrow"
+
+# Scan VOD categories (INDEX counts from "Favoris" = 0 in the VOD menu)
+formuler-mol4-scan "3=FILMS RECENTS" "4=BOX-OFFICE 2025" > movies.jsonl
+
+# Keep the movies above 7 on IMDb (index built once from https://datasets.imdbws.com/)
+formuler-imdb-match --build ./imdb
+formuler-imdb-match --index ./imdb/movies.pkl movies.jsonl --min 7 > matched.jsonl
+```
+
+`--scrcpy` drives the box through scrcpy: key presses take milliseconds instead of ~1 s and frames
+are free instead of ~2 s per screenshot. The Claude Code skill documents the MOL4 traps in detail.
+
 ## Device Compatibility
 
-Developed and tested on **Formuler Z11 Pro MAX** running Android 11 with MyTVOnline 3. Should work with other Formuler devices running MOL3 (MyTVOnline 3), though UI navigation timings may need adjustment.
+Developed and tested on **Formuler Z11 Pro MAX** running Android 11 with MyTVOnline 3 (`formuler-remote`) and MyTVOnline 4 (the `mol4` tools). Should work with other Formuler devices running MOL3 or MOL4, though UI navigation timings may need adjustment.
 
 ## Known Limitations
 

@@ -10,7 +10,11 @@ Precondition: MOL4 shows the universal search screen (UsActivity) or any screen 
 BACK leads there. Run `mol4_star.py --open-search` once from a series/VOD detail page.
 """
 import argparse, json, os, re, struct, subprocess, sys, tempfile, time, unicodedata
+import shutil
 import numpy as np
+
+# ImageMagick 7 is "magick"; Debian/Ubuntu ship ImageMagick 6 as "convert" (same argument order here).
+MAGICK = "magick" if shutil.which("magick") else "convert"
 
 KEY = {"up": 19, "down": 20, "left": 21, "right": 22, "ok": 23, "back": 4, "enter": 66, "del": 67}
 TABS = {"vod": (645, 805), "series": (821, 1035)}  # x-range of the VOD / Séries TV tabs
@@ -61,13 +65,13 @@ def shot(ip, name="s"):
     p = os.path.join(TMP, f"{name}-{_SHOTS[0]:05d}.png")
     raw = adb(ip, "exec-out", "screencap", capture=True)
     w, h = struct.unpack("<II", raw[:8])
-    subprocess.run(["magick", "-size", f"{w}x{h}", "-depth", "8", "rgba:-", p],
+    subprocess.run([MAGICK, "-size", f"{w}x{h}", "-depth", "8", "rgba:-", p],
                    input=raw[16:16 + w * h * 4], check=True)
     return p
 
 
 def rgb(png, w, h, x, y):
-    raw = subprocess.run(["magick", png, "-alpha", "off", "-crop", f"{w}x{h}+{x}+{y}", "+repage",
+    raw = subprocess.run([MAGICK, png, "-alpha", "off", "-crop", f"{w}x{h}+{x}+{y}", "+repage",
                           "-depth", "8", "rgb:-"], capture_output=True).stdout
     return np.frombuffer(raw, np.uint8).reshape(h, w, 3).astype(int)
 
@@ -80,7 +84,7 @@ def ocr(png, w, h, x, y, thr=50, scale=300):
     # One temp file per call: mol4_collect runs OCR in parallel threads.
     fd, t = tempfile.mkstemp(suffix=".png", dir=TMP)
     os.close(fd)
-    subprocess.run(["magick", png, "-alpha", "off", "-crop", f"{w}x{h}+{x}+{y}", "+repage", "-colorspace",
+    subprocess.run([MAGICK, png, "-alpha", "off", "-crop", f"{w}x{h}+{x}+{y}", "+repage", "-colorspace",
                     "gray", "-negate", "-resize", f"{scale}%", "-threshold", f"{thr}%", "-bordercolor",
                     "white", "-border", "20", t])
     out = subprocess.run(["tesseract", t, "stdout", "--psm", "7", "-l", "eng"],

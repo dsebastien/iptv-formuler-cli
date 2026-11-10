@@ -223,7 +223,9 @@ Other: `info`, `guide`, `record`, `delete`, `tab`, `power`, `wakeup`, `sleep`
 On 2026-11-10 the Z11 updated `tv.formuler.mol3.real` to 12.2.5, which is **MyTVOnline 4 under the
 MOL3 package name**. The CLI commands above were built for MOL3; on MOL4 the key sequences for
 search and star are different, and the favorites/history rows in `formuler.media.tv` restart empty.
-Use the `mol4_*.py` scripts in this repo for MOL4. They need `adb`, `tesseract`, ImageMagick and
+Use the `mol4` tools for MOL4. `install.sh` installs them as `formuler-mol4-star`,
+`formuler-mol4-scan`, `formuler-mol4-collect` and `formuler-imdb-match` (same options as the
+`mol4_star.py`, `mol4_scan.py`, `mol4_collect.py` and `imdb_match.py` scripts used below). They need `adb`, `tesseract`, ImageMagick and
 NumPy, and the box IP in `FORMULER_IP` (or `--ip`).
 
 **Use `--scrcpy` (needs the `scrcpy` package and PyAV).** `adb shell input keyevent` starts a Java

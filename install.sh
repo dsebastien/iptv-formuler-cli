@@ -4,13 +4,31 @@ set -euo pipefail
 # Formuler Remote CLI — installer
 # Usage: curl -fsSL https://raw.githubusercontent.com/dsebastien/iptv-formuler-cli/main/install.sh | bash
 
+# Options (environment):
+#   REF=v1.2.0          install a tag or branch instead of main
+#   INSTALL_DIR=...     where commands go (default ~/.local/bin)
+#   NO_MOL4=1           skip the MyTVOnline 4 tools (OCR scripts, Python venv)
+#   ASSUME_YES=1        answer yes to every prompt (non-interactive installs)
+#   SRC_DIR=.           install from a local checkout instead of GitHub (for testing)
+# Flags: --uninstall, --no-mol4, --yes
+
 REPO="dsebastien/iptv-formuler-cli"
+REF="${REF:-main}"
+BASE_URL="https://raw.githubusercontent.com/${REPO}/${REF}"
 SCRIPT_NAME="formuler-remote.py"
-RAW_URL="https://raw.githubusercontent.com/${REPO}/main/${SCRIPT_NAME}"
-SKILL_URL="https://raw.githubusercontent.com/${REPO}/main/.claude/skills/formuler-remote/SKILL.md"
+RAW_URL="${BASE_URL}/${SCRIPT_NAME}"
+SKILL_URL="${BASE_URL}/.claude/skills/formuler-remote/SKILL.md"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 SKILL_DIR="${HOME}/.claude/skills/formuler-remote"
+LIB_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/formuler-remote"
 MIN_PYTHON="3.10"
+NO_MOL4="${NO_MOL4:-}"
+ASSUME_YES="${ASSUME_YES:-}"
+SRC_DIR="${SRC_DIR:-}"
+
+# MyTVOnline 4 tools: script -> command name
+MOL4_SCRIPTS="mol4_star.py mol4_scan.py mol4_collect.py mol4_scrcpy.py imdb_match.py"
+MOL4_COMMANDS="mol4_star.py:formuler-mol4-star mol4_scan.py:formuler-mol4-scan mol4_collect.py:formuler-mol4-collect imdb_match.py:formuler-imdb-match"
 
 # ── helpers ──────────────────────────────────────────────
 
@@ -20,6 +38,57 @@ err()   { printf '\033[31mError: %s\033[0m\n' "$*" >&2; }
 bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+# ask "question" -> 0 for yes (default yes). ASSUME_YES or no terminal: yes.
+ask() {
+    [ -n "$ASSUME_YES" ] && return 0
+    [ -r /dev/tty ] || return 0
+    printf "%s [Y/n] " "$1"
+    local answer
+    read -r answer </dev/tty || return 0
+    case "$answer" in [nN]*) return 1 ;; *) return 0 ;; esac
+}
+
+download() {  # download URL DEST   (with SRC_DIR: copy the same path from the checkout)
+    if [ -n "$SRC_DIR" ]; then
+        cp "${SRC_DIR}/${1#"${BASE_URL}"/}" "$2"
+    elif command_exists curl; then
+        curl -fsSL "$1" -o "$2"
+    elif command_exists wget; then
+        wget -qO "$2" "$1"
+    else
+        err "Neither curl nor wget found. Cannot download."
+        return 1
+    fi
+}
+
+# install_pkg "label" apt dnf pacman zypper apk brew nix   (use - when a manager has no package)
+install_pkg() {
+    local label="$1" pkg i=0
+    shift
+    local names=("$@") managers=(apt dnf pacman zypper apk brew nix)
+    local mgr
+    mgr=$(detect_pkg_manager)
+    [ "$mgr" = "yum" ] && mgr="dnf"
+    for m in "${managers[@]}"; do
+        if [ "$m" = "$mgr" ]; then pkg="${names[$i]:-}"; fi
+        i=$((i + 1))
+    done
+    if [ -z "${pkg:-}" ] || [ "$pkg" = "-" ]; then
+        warn "Install ${label} manually (no package known for ${mgr})."
+        return 1
+    fi
+    case "$mgr" in
+        apt)    sudo apt-get install -y -qq $pkg ;;
+        dnf)    sudo dnf install -y $pkg ;;
+        pacman) sudo pacman -S --needed --noconfirm $pkg ;;
+        zypper) sudo zypper install -y $pkg ;;
+        apk)    sudo apk add $pkg ;;
+        brew)   brew install $pkg ;;
+        nix)    nix-env -iA $(printf 'nixpkgs.%s ' $pkg) ;;
+        *)      warn "Install ${label} manually."; return 1 ;;
+    esac
+}
 
 detect_os() {
     case "$(uname -s)" in
@@ -118,11 +187,10 @@ check_adb() {
         return
     fi
 
-    printf "ADB is required but not installed. Install now? [Y/n] "
-    read -r answer </dev/tty
-    case "$answer" in
-        [nN]*) warn "Skipping ADB install. You'll need it before using formuler-remote."; return ;;
-    esac
+    if ! ask "ADB is required but not installed. Install now?"; then
+        warn "Skipping ADB install. You'll need it before using formuler-remote."
+        return
+    fi
 
     install_adb "$os" "$pkg"
 
@@ -143,14 +211,7 @@ install_script() {
     trap 'rm -f "$tmp"' EXIT
 
     info "Downloading ${SCRIPT_NAME}..."
-    if command_exists curl; then
-        curl -fsSL "$RAW_URL" -o "$tmp"
-    elif command_exists wget; then
-        wget -qO "$tmp" "$RAW_URL"
-    else
-        err "Neither curl nor wget found. Cannot download."
-        return 1
-    fi
+    download "$RAW_URL" "$tmp"
 
     mv "$tmp" "${INSTALL_DIR}/${SCRIPT_NAME}"
     chmod +x "${INSTALL_DIR}/${SCRIPT_NAME}"
@@ -163,6 +224,68 @@ install_script() {
     info "Symlink: ${INSTALL_DIR}/formuler-remote"
 }
 
+# ── MyTVOnline 4 tools ───────────────────────────────────
+
+check_mol4_deps() {
+    if command_exists tesseract; then
+        info "tesseract found"
+    elif ask "The MOL4 tools need tesseract (OCR). Install it now?"; then
+        install_pkg "tesseract" "tesseract-ocr tesseract-ocr-eng" tesseract "tesseract tesseract-data-eng" \
+            "tesseract-ocr tesseract-ocr-traineddata-english" "tesseract-ocr tesseract-ocr-data-eng" \
+            tesseract tesseract || true
+    fi
+    if command_exists magick; then
+        info "ImageMagick 7 found"
+    elif command_exists convert; then
+        info "ImageMagick 6 found (convert)"
+    elif ask "The MOL4 tools need ImageMagick. Install it now?"; then
+        install_pkg "ImageMagick" imagemagick ImageMagick imagemagick ImageMagick imagemagick imagemagick imagemagick || true
+    fi
+    if command_exists scrcpy; then
+        info "scrcpy found ($(scrcpy --version 2>/dev/null | head -1 | cut -d' ' -f2)): --scrcpy mode available"
+    elif ask "Optional: install scrcpy for the much faster --scrcpy mode?"; then
+        install_pkg "scrcpy" scrcpy - scrcpy - - scrcpy scrcpy || true
+    fi
+}
+
+install_mol4() {
+    mkdir -p "$LIB_DIR"
+    info "Downloading the MyTVOnline 4 tools to ${LIB_DIR}..."
+    local f
+    for f in $MOL4_SCRIPTS; do
+        download "${BASE_URL}/${f}" "${LIB_DIR}/${f}.tmp"
+        mv "${LIB_DIR}/${f}.tmp" "${LIB_DIR}/${f}"
+    done
+
+    # Own venv: system Pythons often refuse pip installs (PEP 668).
+    local py
+    py=$(command -v python3 || command -v python)
+    if [ ! -x "${LIB_DIR}/venv/bin/python" ]; then
+        info "Creating a Python environment in ${LIB_DIR}/venv..."
+        if ! "$py" -m venv "${LIB_DIR}/venv"; then
+            err "Could not create a venv (on Debian/Ubuntu: sudo apt-get install python3-venv)."
+            return 1
+        fi
+    fi
+    info "Installing NumPy and PyAV (PyAV is for --scrcpy)..."
+    "${LIB_DIR}/venv/bin/python" -m pip install -q --upgrade pip >/dev/null 2>&1 || true
+    "${LIB_DIR}/venv/bin/python" -m pip install -q numpy
+    "${LIB_DIR}/venv/bin/python" -m pip install -q av \
+        || warn "PyAV did not install: the tools work, but without --scrcpy."
+
+    local pair script cmd
+    for pair in $MOL4_COMMANDS; do
+        script="${pair%%:*}"
+        cmd="${pair##*:}"
+        cat > "${INSTALL_DIR}/${cmd}" <<WRAPPER
+#!/usr/bin/env sh
+exec "${LIB_DIR}/venv/bin/python" "${LIB_DIR}/${script}" "\$@"
+WRAPPER
+        chmod +x "${INSTALL_DIR}/${cmd}"
+    done
+    info "Commands: formuler-mol4-star, formuler-mol4-scan, formuler-mol4-collect, formuler-imdb-match"
+}
+
 # ── Claude Code skill ────────────────────────────────────
 
 install_skill() {
@@ -172,12 +295,8 @@ install_skill() {
     tmp=$(mktemp)
 
     info "Installing Claude Code skill..."
-    if command_exists curl; then
-        curl -fsSL "$SKILL_URL" -o "$tmp"
-    elif command_exists wget; then
-        wget -qO "$tmp" "$SKILL_URL"
-    else
-        warn "Cannot download skill (no curl/wget). Skipping."
+    if ! download "$SKILL_URL" "$tmp"; then
+        warn "Cannot download the skill. Skipping."
         rm -f "$tmp"
         return
     fi
@@ -233,6 +352,19 @@ uninstall() {
         info "Removed symlink ${INSTALL_DIR}/formuler-remote"
     fi
 
+    # Remove MyTVOnline 4 tools
+    local pair
+    for pair in $MOL4_COMMANDS; do
+        if [ -f "${INSTALL_DIR}/${pair##*:}" ]; then
+            rm -f "${INSTALL_DIR}/${pair##*:}"
+            info "Removed ${INSTALL_DIR}/${pair##*:}"
+        fi
+    done
+    if [ -d "$LIB_DIR" ]; then
+        rm -rf "$LIB_DIR"
+        info "Removed ${LIB_DIR}"
+    fi
+
     # Remove skill
     if [ -d "$SKILL_DIR" ]; then
         rm -rf "$SKILL_DIR"
@@ -244,8 +376,9 @@ uninstall() {
     local cache_dir="${HOME}/.cache/formuler-remote"
 
     if [ -d "$config_dir" ] || [ -d "$cache_dir" ]; then
+        local answer=""
         printf "Remove config and cache directories? [y/N] "
-        read -r answer </dev/tty
+        [ -r /dev/tty ] && read -r answer </dev/tty || true
         case "$answer" in
             [yY]*)
                 [ -d "$config_dir" ] && rm -rf "$config_dir" && info "Removed $config_dir"
@@ -282,6 +415,10 @@ main() {
     check_python
     check_adb "$os" "$pkg"
     install_script
+    if [ -z "$NO_MOL4" ]; then
+        check_mol4_deps
+        install_mol4 || warn "MyTVOnline 4 tools not installed (formuler-remote still works)."
+    fi
     install_skill
     check_path
 
@@ -297,13 +434,25 @@ main() {
     echo "  # Or run a command directly"
     echo "  formuler-remote tune TF1"
     echo ""
+    if [ -z "$NO_MOL4" ]; then
+        echo "  # MyTVOnline 4 (Z11 with MOL 12.x): star titles, scan the VOD catalog"
+        echo "  formuler-mol4-star --scrcpy --type series \"Silo\""
+        echo "  formuler-mol4-scan \"4=BOX-OFFICE 2025\" > movies.jsonl"
+        echo ""
+    fi
     echo "  # Claude Code skill installed — Claude can now control your TV!"
     echo "  # Try asking: 'tune to TF1' or 'play the movie batman'"
     echo ""
 }
 
 # Dispatch: --uninstall or install
-case "${1:-}" in
-    --uninstall) uninstall ;;
-    *)           main ;;
-esac
+ACTION=main
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall) ACTION=uninstall ;;
+        --no-mol4)   NO_MOL4=1 ;;
+        --yes|-y)    ASSUME_YES=1 ;;
+        *)           err "Unknown option: $arg"; exit 2 ;;
+    esac
+done
+"$ACTION"
