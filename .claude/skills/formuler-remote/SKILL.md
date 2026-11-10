@@ -217,3 +217,108 @@ Other: `info`, `guide`, `record`, `delete`, `tab`, `power`, `wakeup`, `sleep`
 ## Known Apps
 
 `mytv`, `youtube`, `netflix`, `plex`, `kodi`, `vlc`, `prime`, `disney`, `settings`
+
+## MyTVOnline 4 (MOL4) on the Z11: favorites, catalog scans, recovery
+
+On 2026-11-10 the Z11 updated `tv.formuler.mol3.real` to 12.2.5, which is **MyTVOnline 4 under the
+MOL3 package name**. The CLI commands above were built for MOL3; on MOL4 the key sequences for
+search and star are different, and the favorites/history rows in `formuler.media.tv` restart empty.
+Use the `mol4_*.py` scripts in this repo for MOL4. They need `adb`, `tesseract`, ImageMagick and
+NumPy, and the box IP in `FORMULER_IP` (or `--ip`).
+
+**Use `--scrcpy` (needs the `scrcpy` package and PyAV).** `adb shell input keyevent` starts a Java
+process per call (~1 s on the Z11) and `screencap` takes ~2 s per image. `mol4_scrcpy.py` runs the
+scrcpy server once: keys go through its control socket in milliseconds and the screen arrives as
+H.264, so a frame is free. Live video still shows as black.
+
+### What MOL4 does and does not expose
+
+- No text in `uiautomator dump`, and `tv.formuler.mytvonline.provider` requires the signature
+  permission `tv.formuler.molprovider.ACCESS`. `adb backup` returns an empty archive (47 bytes).
+  The app database is not readable without root. Do not try to root the box; unlocking the
+  bootloader wipes the data partition.
+- `content://formuler.media.tv/preview_program` (launcher rows) is readable and gives deep-link
+  intents (`SchemeLinkActivity` with `vod_unique_id`).
+- Screenshots work on menu and detail screens (`exec-out screencap -p`). Live video is a plain
+  green image.
+- The update can switch **network debugging off**: turn it on again after every MOL update.
+- Never "Clear data" or reinstall MOL after an update that lost favorites: the old database may
+  still be on the box (276 MB in the 2026-11-10 case) and only Formuler can migrate it.
+
+### Star series or movies: `mol4_star.py`
+
+```bash
+python3 mol4_star.py --type series "Silo" "Les Simpson"            # star (best quality: UHD/4K > FHD > MULTI > HD)
+python3 mol4_star.py --type series --prefer MULTI "Battlestar Galactica"
+python3 mol4_star.py --type series "robot=>Mr Robot"               # search text => expected title
+python3 mol4_star.py --type vod "odyssee=>L Odyssee"
+python3 mol4_star.py --unstar --type series "arrow=>Allen v Farrow"
+python3 mol4_star.py --dry-run ...                                  # read the star, do not press
+python3 mol4_star.py --scrcpy ...                                   # much faster (see above)
+```
+
+One JSON line per title: `starred`, `already`, `unstarred`, `not-in-catalog`, `no-match` (with the
+OCR'd titles it saw), `focus-failed`, `search-failed`. About 15 s per title.
+
+How it works, and the traps it handles (each one caused a wrong star during the first run):
+
+1. **The star is a toggle.** Read the star before pressing: the focused button's center pixel is
+   white when filled, red when empty. The button row moves up or down with the description length.
+2. **Poster star badges are stale** (search results are cached). Never skip a title because of the
+   yellow badge; always open it and read the real star. Yellow posters (Pluribus) also look like badges.
+3. **Search field focus:** exactly one UP from the tabs (two from a card) gives the field with a
+   cursor. A further UP removes the cursor and typing goes nowhere. Never press OK on the field:
+   it can submit the old text. Check the field text with OCR after typing.
+4. **App search needs the catalog's characters:** "Mr Robot" finds nothing, "robot" finds
+   "Mr. Robot". Use `search=>expected title`.
+5. **Matching:** exact title first, then "title starts with the query"; a one-word query never
+   matches inside a longer title ("Sherlock" must not pick "Young Sherlock", "Arrow" must not pick
+   "Allen v. Farrow"). French catalog titles: Les Simpson, Les Soprano, Rick et Morty, Désenchantée,
+   Dr House, Formula 1 : Pilotes de leur destin, L'Accusé (= Contratiempo / The Invisible Guest).
+6. **The results row keeps the scroll of the previous search:** DOWN, LEFT x12, UP before reading
+   the cards, so card i is in slot i.
+7. **Focus check by poster image,** not OCR: the focused card's title scrolls (marquee). The focus
+   frame is two thin red vertical lines one card apart; red posters ("Love, Death & Robots") fool a
+   plain red-pixel search.
+8. **VOD search can load for more than 10 s** (spinner): wait up to 35 s for cards or
+   "Pas de contenu" before reading results.
+9. `open_search()`: UsActivity is not exported. Deep-link a title page from `preview_program`
+   **without** `season_id`/`episode_id`, then UP, RIGHT, OK on its search icon.
+
+### Scan VOD categories: `mol4_scan.py` + `mol4_collect.py`
+
+```bash
+python3 mol4_scan.py "3=FILMS RECENTS" "4=BOX-OFFICE 2025" "35=FILMS 4K UHD" > items.jsonl
+```
+
+`INDEX` counts from "Favoris" = 0 in the VOD left menu (Favoris, Historique, Ajouts récents, then
+the provider categories; the list wraps around, so never press UP to "reach the top"). About 2.5 s
+per movie. Traps:
+
+- A plain relaunch restores the last screen: `am force-stop` first (keeps the data).
+- After a fresh start the first selected category stays a grey skeleton: select the previous entry
+  and come back, then wait until the header shows a year (dimmed text: OCR threshold 70).
+- The header title turns into a logo image ~1 s after focus. Take the title screenshot on the box
+  in the same shell call as the key press (`input keyevent 22; screencap -p ...`), then read the
+  meta line from a second screenshot.
+- "Ajouts récents" is a single row with logos; prefer the category grids (7 per row).
+- At its end the grid wraps to the top: stop when a title fingerprint repeats.
+- `INDEX=NAME@SKIP` resumes a category at item SKIP.
+
+### Do not touch the provider portal
+
+The Stalker portal checks more than the MAC (it answers `UDONTHAVEACCESS` to a non-box client).
+Login attempts from another device with the box MAC can get the home IP blocked for hours, which
+cuts the box off too. Work through the box UI only.
+
+### Filter by IMDb rating: `imdb_match.py`
+
+```bash
+python3 imdb_match.py --build DIR                         # DIR has title.{ratings,basics,akas}.tsv.gz from datasets.imdbws.com
+python3 imdb_match.py --index DIR/movies.pkl items.jsonl --min 7 > matched.jsonl
+```
+
+Matches on title (primary, original, FR/BE/CA AKAs, split elision "LAccusé" -> "L Accusé",
+truncated "..." prefix), year +/- 1, runtime. `keep` = rating > min, >= 500 votes, not
+documentary/concert/show (Music without a narrative genre counts as a concert). The app shows
+TMDb %, not IMDb.
