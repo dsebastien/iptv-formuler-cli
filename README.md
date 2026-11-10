@@ -30,6 +30,9 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 - **Dry-run mode** — preview ADB commands without executing
 - **CEC control** — power TV on/off through the Formuler box
 - **Screen capture** — screenshots and screen recording
+- **Screen mirroring** — live view of the box on your computer via [scrcpy](https://github.com/Genymobile/scrcpy), with audio here or on the TV
+- **Web remote** — `serve` gives a token-protected remote control page for phone/tablet on your network, including a live picture + sound stream ("Watch here")
+- **Playback check** — `play-movie`/`play-series` only report success once the player is actually playing
 - **M3U export** — export channel lineup as M3U playlist
 - **Shell completions** — bash, zsh, and fish completion scripts
 - **Configurable timing** — tune navigation delays for your device speed
@@ -48,6 +51,9 @@ Single-file Python script, zero dependencies beyond stdlib. Control your Formule
 
    # macOS
    brew install android-platform-tools
+
+   # Windows
+   winget install Google.PlatformTools
    ```
 3. **Enable ADB on your Formuler**: Settings > System > Developer Options > ADB Debugging > ON
 4. **Note your device IP**: Settings > Network
@@ -85,6 +91,26 @@ cp formuler-remote.py ~/.local/bin/
 mkdir -p ~/.claude/skills/formuler-remote
 cp .claude/skills/formuler-remote/SKILL.md ~/.claude/skills/formuler-remote/
 ```
+
+### Windows
+
+`install.sh` needs bash; on Windows install manually (PowerShell):
+
+```powershell
+git clone https://github.com/BlazeForce-NL/iptv-formuler-cli.git
+cd iptv-formuler-cli
+pip install pyreadline3   # optional: tab completion + history in interactive mode
+python formuler-remote.py <your-device-ip> ping
+# Optional: install Claude Code skill
+New-Item -ItemType Directory -Force "$HOME\.claude\skills\formuler-remote"
+Copy-Item .claude\skills\formuler-remote\SKILL.md "$HOME\.claude\skills\formuler-remote\"
+```
+
+Notes:
+- Screenshots, recordings and UI dumps default to `%TEMP%` instead of `/tmp`.
+- Config and cache live in `%USERPROFILE%\.config\formuler-remote` and `%USERPROFILE%\.cache\formuler-remote`.
+- Without `pyreadline3` the interactive mode works, but without tab completion and history.
+- The single-instance lock is not enforced on Windows.
 
 ## Uninstall
 
@@ -160,7 +186,39 @@ formuler-remote wake                      # CEC wakeup + launch MyTV
 formuler-remote power-off                 # CEC sleep + disconnect
 formuler-remote ping                      # check device connectivity
 formuler-remote export-m3u channels.m3u   # export channel lineup
+
+# Screen mirroring (needs scrcpy: winget install Genymobile.scrcpy / brew install scrcpy)
+formuler-remote mirror                    # video + audio on this computer
+formuler-remote mirror --no-audio         # video here, sound stays on the TV
+formuler-remote mirror --fullscreen       # start fullscreen
+# On Android 11 (Z11 Pro MAX) audio forwarding mutes the TV; closing the window restores it.
 ```
+
+### Web Remote
+
+Control the box from a phone, tablet or browser on the same network:
+
+```bash
+formuler-remote serve            # LAN, port 8765
+formuler-remote serve 9000       # other port
+formuler-remote serve --local    # only this computer (127.0.0.1)
+```
+
+It prints a link like `http://192.168.0.185:8765/?t=…`. Open it on your phone and bookmark it. With an IPTV account configured, a switch at the top picks the mode: *📡 IPTV direct* (channels and the guide play on the phone, straight from the provider; tabs *Channels* and *Guide*) or *📺 TV* (they tune the box; tabs *Remote*, *Channels*, *Guide* and *Movies*, plus mirroring the TV screen). The player sits below it; the last mode and tab are remembered. The page has a D-pad, volume/channel keys, app buttons (MyTVOnline, YouTube, Prime Video), a channel grid with logos per country (Nederland, België, USA, Canada, Australië, Nieuw-Zeeland) with TV / 24/7 / Events / Radio filters (variants such as `NPO1 4K` / `NPO 1 FHD` / `NPO1 LQ` show as one tile that tunes the best quality; tick *All variants* to see them all), a play form for series/movies and mirror buttons. Arrow keys, Enter, Backspace, `+`/`-` and PageUp/PageDown work on a keyboard too.
+
+- **Access token:** every request needs the token in the link. It is stored in `~/.cache/formuler-remote/web_token` so bookmarks survive restarts; delete that file to revoke old links.
+- **Allowed commands:** the page can only run remote-control commands (tune, play, open, mirror, …), not `reboot`, `serve`, `watch` or `record`.
+- **Speed:** key presses go through one persistent `adb shell`; other commands run one at a time through the CLI.
+- **Watch here:** streams the box's picture and sound to the browser (needs [scrcpy](https://github.com/Genymobile/scrcpy) and [ffmpeg](https://ffmpeg.org/): `winget install Genymobile.scrcpy Gyan.FFmpeg`). scrcpy records the screen without a window, ffmpeg turns it into ~1s HLS segments, and the page plays them with [hls.js](https://github.com/video-dev/hls.js) (native HLS as fallback). The player stays a few segments behind the live edge so uneven delivery doesn't stall it: about 4s behind for the TV screen, 10–15s for provider channels. On Android 11 the TV is muted while streaming; **Stop** gives the sound back. The stream restarts itself every ~70 minutes to keep its temp file small.
+- **Play on this device:** with an Xtream Codes account in `.env` (see [IPTV provider](#iptv-provider-optional)) the channel list gets a *Play on TV / Play on this device* switch. On this device, the server's ffmpeg pulls the channel straight from the provider and remuxes it to HLS (audio to AAC; channels tagged HEVC/H265 are re-encoded to 720p H.264), so you can watch something else than the TV. The current and next programme come from the provider's EPG. Many subscriptions allow one connection: when it's in use (usually by the TV) the page offers to put the TV to sleep first. The stream stops by itself about a minute after the last player went away.
+- **Guide:** with `IPTV_EPG_LINK` (an XMLTV URL) next to the account in `.env`, the page shows a programme grid for the channels in the list (same country, type and filter), 6 hours per view from 3 hours back to about 30 hours ahead. Tap a programme for its description; one that's on now can be watched from there. The server downloads the XMLTV file in the background at most every 12 hours (it can be ~100 MB, a few minutes the first time) to `~/.cache/formuler-remote/epg.xml` and keeps an index in memory; channels are matched through the provider's `epg_channel_id`.
+- **Channel tiles:** with the guide loaded, each tile shows the programme that's on now with a progress bar. Holding a tile for half a second (the touch version of hovering) shows a current frame of that channel in the tile, grabbed from the provider in about a second and cached for 3 minutes; a normal tap still tunes or plays. Previews are fetched one tile at a time on request, never for the whole list, so the provider doesn't see a burst of connections.
+- **Programme search:** the Guide tab searches titles and descriptions of what's on now, later, or both, on the channels of all countries (e.g. `voetbal`). A programme that's on can be watched right away; ⏰ on a later one makes the server wake the box and tune the TV when it starts (also from a programme's details in the grid).
+- **Movies & series on the phone:** in *IPTV direct* mode the *Movies* tab searches the provider's movie and series catalog (loaded on the first search, about a minute, then cached for a day in `~/.cache/formuler-remote/vod_*.json`). Series open a season/episode list. H.264 versions are passed through as they are; others are converted to 720p on the computer. 4K versions are marked: at ~20 Mbit/s they come in slower than real time from this provider and stutter, a normal version plays smoothly. Playback starts at the beginning and can be scrolled back.
+- **Sleep timer:** 30 / 60 / 90 minutes or off, in the Remote tab. Runs in the server (the CLI's `sleep-timer` lives in its own process), puts the box to sleep and stops streams on the page. Timers are saved in `~/.cache/formuler-remote/web_timers.json` and survive a restart of `serve`.
+- **Zapping:** while something plays on the page, *Previous/Next channel* steps through the channel list for a direct stream, or sends channel up/down to the box for the mirror.
+- **Home screen:** the page has a web app manifest and icon, so *Add to Home Screen* gives it its own icon. On iPhone it opens full screen; Chrome on Android only opens it without the address bar over HTTPS, which `serve` doesn't do, so there it opens as a browser tab.
+- **Windows:** allow Python through the firewall for private networks when asked, otherwise the phone can't connect.
 
 ### Interactive Mode
 
@@ -232,6 +290,8 @@ EOF
 | | `search <query>` | Search local DB + device |
 | | `list [filter]` | List favorites/history |
 | | `list-all [filter]` | List all enumerated channels |
+| | `country [code] [filter]` | List countries, or all live channels of one (`nl be us ca au nz uk`) |
+| | `tune-id <unique_id>` | Tune by provider channel id (from `country --json`) |
 | | `channel-info <number>` | Show channel details |
 | | `categories` | Show category counts |
 | **VOD** | `search-vod <query>` | Search movies on device UI |
@@ -390,6 +450,17 @@ The device address is resolved in this order (first match wins):
    ```
 4. **Config file** (see below)
 
+### IPTV provider (optional)
+
+For *Play on this device* in the web remote, add your provider's Xtream Codes login to the same `.env` file (kept local, never sent anywhere but the provider):
+```
+IPTV_SERVER=http://provider.example:8080
+IPTV_USER=your-username
+IPTV_PASS=your-password
+IPTV_EPG_LINK=http://provider.example:8080/xmltv.php?username=...&password=...   # optional, for the guide
+```
+Channel tiles map to provider streams through the MyTVOnline channel id (`2_<group>_<stream>_0`), so it works for the channels the box lists.
+
 ### Config file
 
 Create `~/.config/formuler-remote/config.toml` (Python 3.11+) or `config.json`:
@@ -406,11 +477,16 @@ channels_max_age_hours = 24
 nav_delay = 0.25
 load_delay = 2.0
 search_delay = 1.5
+playback_timeout = 60
 
 [aliases]
 tf1 = "TF1 HD"
 bfm = "BFM TV"
 france2 = "France 2 HD"
+
+# Extra countries for 'country' and the web remote: code = [name, [title prefixes]]
+[countries]
+de = ["Duitsland", ["DE"]]
 
 [macros]
 morning = "open mytv; wait 3; tune BFM TV"
@@ -453,6 +529,7 @@ Device navigation speed can be tuned in the `[timing]` section of your config fi
 nav_delay = 0.25    # seconds between key presses (default 0.25)
 load_delay = 2.0    # seconds after opening screens (default 2.0)
 search_delay = 1.5  # seconds after search input (default 1.5)
+playback_timeout = 60  # max seconds to wait for VOD playback to start (default 60)
 ```
 
 Useful if your device responds faster or slower than the defaults.

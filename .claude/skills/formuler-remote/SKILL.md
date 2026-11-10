@@ -35,6 +35,8 @@ Uses direct deeplinks via the Android content provider for instant VOD/series pl
 | Play series episode | `formuler-remote --json --first play-series "breaking bad" 2 3` |
 | Search channels | `formuler-remote --json search france` |
 | List all channels | `formuler-remote --json list-all` |
+| All live channels of a country | `formuler-remote --json country be` (codes: `nl be us ca au nz uk`) |
+| Tune by provider id | `formuler-remote --json tune-id 2_1451_811983_0` |
 | Channel info | `formuler-remote --json channel-info 42` |
 | Device status | `formuler-remote --json status` |
 | Ping device | `formuler-remote --json ping` |
@@ -49,6 +51,11 @@ Uses direct deeplinks via the Android content provider for instant VOD/series pl
 | Sleep at time | `formuler-remote --json sleep-at 23:30` |
 | Cancel sleep | `formuler-remote --json sleep-cancel` |
 | Export M3U | `formuler-remote --json export-m3u channels.m3u` |
+| Mirror screen to this computer (audio here, TV muted) | `formuler-remote --json mirror` |
+| Mirror screen, sound stays on TV | `formuler-remote --json mirror --no-audio` |
+| Web remote for phone/tablet (blocks; run in background) | `formuler-remote serve` |
+
+`play-movie` / `play-series` return `"verified": true` only when playback actually started; otherwise `ok: false` with the player's error or a timeout (this provider can take ~50s to start VOD).
 | Watch screenshots | `formuler-remote --json watch 5 /tmp` |
 | Chain commands | `formuler-remote --json --first 'tune TF1 ; wait 5 ; screenshot'` |
 | List commands | `formuler-remote --json commands` |
@@ -199,6 +206,7 @@ Device navigation speed can be tuned in config:
 nav_delay = 0.25    # seconds between key presses (default 0.25)
 load_delay = 2.0    # seconds after opening screens (default 2.0)
 search_delay = 1.5  # seconds after search input (default 1.5)
+playback_timeout = 60  # max seconds to wait for VOD playback to start (default 60)
 ```
 
 ## Key Names
