@@ -94,7 +94,7 @@ cp .claude/skills/formuler-remote/SKILL.md ~/.claude/skills/formuler-remote/
 `install.sh` needs bash; on Windows install manually (PowerShell):
 
 ```powershell
-git clone https://github.com/BlazeForce-NL/iptv-formuler-cli.git
+git clone https://github.com/dsebastien/iptv-formuler-cli.git
 cd iptv-formuler-cli
 pip install pyreadline3   # optional: tab completion + history in interactive mode
 python formuler-remote.py <your-device-ip> ping
